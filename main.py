@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -8,7 +10,7 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask
+from flask import Flask, request
 from google import genai
 from google.genai import types
 from telegram import Update
@@ -27,6 +29,10 @@ MEDIA_API = "https://b.jw-cdn.org/apis/mediator/v1"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JWSchillBot/1.0)"}
 app = Flask(__name__)
 bot_ready = threading.Event()
+telegram_application = None
+telegram_loop = None
+WEBHOOK_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+WEBHOOK_SECRET = hashlib.sha256(("JW-Schill:" + TELEGRAM_TOKEN).encode()).hexdigest() if TELEGRAM_TOKEN else ""
 
 SYSTEM_PROMPT = """
 Sei un assistente virtuale fraterno e rispondi in italiano con tono rispettoso, chiaro e caloroso.
@@ -45,6 +51,20 @@ def index():
 @app.get("/health")
 def health():
     return ({"status": "ok"}, 200) if bot_ready.is_set() else ({"status": "starting"}, 503)
+
+@app.post("/telegram")
+def telegram_webhook():
+    if not bot_ready.is_set() or telegram_application is None or telegram_loop is None:
+        return {"status": "starting"}, 503
+    supplied_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(supplied_secret, WEBHOOK_SECRET):
+        return {"status": "forbidden"}, 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"status": "invalid request"}, 400
+    update = Update.de_json(payload, telegram_application.bot)
+    telegram_loop.call_soon_threadsafe(telegram_application.update_queue.put_nowait, update)
+    return {"ok": True}, 200
 
 def official_url(url):
     try:
@@ -249,7 +269,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for offset in range(0, len(answer), 3900):
         await update.message.reply_text(answer[offset:offset + 3900])
 
-async def remove_old_webhook(application):
+async def run_webhook_bot(application):
+    global telegram_loop
+    telegram_loop = asyncio.get_running_loop()
+    await application.initialize()
+    await application.start()
+    webhook_url = WEBHOOK_BASE_URL + "/telegram"
+    await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET, allowed_updates=Update.ALL_TYPES)
+    bot_ready.set()
+    logger.info("Bot pronto tramite webhook Telegram su Render")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        bot_ready.clear()
+        await application.stop()
+        await application.shutdown()
+
+async def mark_polling_ready(application):
+    # Local development only; Render uses webhooks to avoid getUpdates conflicts.
     await application.bot.delete_webhook(drop_pending_updates=False)
     bot_ready.set()
 
@@ -257,16 +294,23 @@ def run_web_server():
     app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)
 
 def main():
+    global telegram_application
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Variabile TELEGRAM_TOKEN mancante")
     if not GEMINI_API_KEY:
         raise RuntimeError("Variabile GEMINI_API_KEY mancante")
     threading.Thread(target=run_web_server, name="health-server", daemon=True).start()
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(remove_old_webhook).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Avvio polling Telegram; modello Gemini configurato: %s", GEMINI_MODEL)
-    application.run_polling(drop_pending_updates=False)
+    if WEBHOOK_BASE_URL:
+        telegram_application = Application.builder().token(TELEGRAM_TOKEN).build()
+        telegram_application.add_handler(CommandHandler("start", start))
+        telegram_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        asyncio.run(run_webhook_bot(telegram_application))
+    else:
+        application = Application.builder().token(TELEGRAM_TOKEN).post_init(mark_polling_ready).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        logger.info("Avvio polling Telegram per sviluppo locale; modello Gemini: %s", GEMINI_MODEL)
+        application.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
     main()
