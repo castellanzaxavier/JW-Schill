@@ -116,7 +116,7 @@ def fetch_page_long(url, limit=60000):
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
-        for selector in ("div.bodyTxt", "div.docBody", "article"):
+        for selector in ("#regionMain", "div.bodyTxt", "div.docBody", "article"):
             node = soup.select_one(selector)
             if node:
                 text = clean_text(str(node))
