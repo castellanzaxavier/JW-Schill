@@ -108,6 +108,26 @@ def fetch_page(url):
         logger.info("Pagina JW non recuperabile: %s", exc)
         return None
 
+def fetch_page_long(url, limit=60000):
+    """Estrae il testo completo delle pagine WOL che contengono capitoli e domande."""
+    if not official_url(url):
+        return None
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for selector in ("div.bodyTxt", "div.docBody", "article"):
+            node = soup.select_one(selector)
+            if node:
+                text = clean_text(str(node))
+                if text:
+                    return text[:limit]
+        text = clean_text(str(soup))
+        return text[:limit] or None
+    except requests.RequestException as exc:
+        logger.info("Pagina JW completa non recuperabile: %s", exc)
+        return None
+
 def search_wol(query, limit=4):
     """Cerca nelle pubblicazioni ufficiali della Biblioteca Online Watchtower."""
     url = f"https://wol.jw.org/{LOCALE}/wol/s/{WOL_ROUTE}?q={quote_plus(query)}"
@@ -152,28 +172,28 @@ def weekly_congregation_study(query):
     today = datetime.now(ZoneInfo("Europe/Rome")).date()
     monday = today - timedelta(days=today.weekday())
     url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
-    schedule = fetch_page(url)
+    schedule = fetch_page_long(url)
     if not schedule:
         logger.warning("Programma settimanale WOL non recuperabile: %s", url)
         return None
 
-    chunks = [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{schedule}"]
-    sources = [url]
     chapter = re.search(r"\bwcg\s+cap\.?\s*(\d+)\b", schedule, flags=re.I)
-    if chapter:
-        number = chapter.group(1)
-        results = search_wol(f"wcg cap. {number}", limit=8)
-        for result in results:
-            content = fetch_page(result["url"])
-            if content and ("per parlarne insieme" in normalize(content) or "la tua risposta" in normalize(content)):
-                chunks.append(f"CAPITOLO {number} DEL LIBRO INDICATO DAL PROGRAMMA: {result['title']}\nURL: {result['url']}\n{content}")
-                sources.append(result["url"])
-                break
-        if len(sources) == 1:
-            logger.warning("Capitolo wcg %s non trovato nei risultati WOL", number)
-    else:
-        logger.warning("Il programma settimanale non indica un capitolo wcg")
-    return chunks, sources
+    if not chapter:
+        logger.warning("Capitolo dello studio non trovato nel programma WOL: %s", url)
+        return None
+
+    number = chapter.group(1)
+    results = search_wol(f"wcg cap. {number}", limit=8)
+    for result in results:
+        content = fetch_page_long(result["url"])
+        if content and ("per parlarne insieme" in normalize(content) or "la tua risposta" in normalize(content)):
+            relevant_schedule = schedule[max(0, chapter.start() - 250):chapter.end() + 250]
+            chunks = [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{relevant_schedule}",
+                      f"CAPITOLO {number} DEL LIBRO INDICATO DAL PROGRAMMA: {result['title']}\nURL: {result['url']}\n{content}"]
+            return chunks, [url, result["url"]]
+
+    logger.warning("Capitolo wcg %s non trovato nei risultati WOL", number)
+    return None
 
 def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
