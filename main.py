@@ -1,118 +1,188 @@
-import os
+import asyncio
 import logging
+import os
+import re
 import threading
-from flask import Flask
-from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
-import google.generativeai as genai
+from urllib.parse import urlsplit
+
 import requests
 from bs4 import BeautifulSoup
-import asyncio
+from flask import Flask
+from google import genai
+from google.genai import types
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-PORT = int(os.environ.get("PORT", 10000))
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+)
+logger = logging.getLogger(__name__)
 
-# Server Flask per mantenere Render attivo sulla porta
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+PORT = int(os.environ.get("PORT", "10000"))
+
 app = Flask(__name__)
-
-@app.route("/")
-def index():
-    return "Bot JW attivo e operativo nel cloud!"
-
-genai.configure(api_key=GEMINI_API_KEY)
+bot_ready = threading.Event()
 
 SYSTEM_PROMPT = """
-Sei un assistente virtuale fraterno, parli con un tono caloroso, rispettoso, edificante e fraterno (ti rivolgi all'utente chiamandolo "fratello" o con affetto cristiano).
-Il tuo compito è rispondere alle domande e analizzare i testi tratti da JW.org e wol.jw.org attingendo esclusivamente dai contenuti ufficiali.
-Se non trovi informazioni certe su queste fonti, di' con dolcezza che non ci sono risposte specifiche pubblicate su jw.org.
-"""
+Sei un assistente virtuale fraterno. Usa un tono caloroso, rispettoso e edificante.
+Aiuti l'utente a comprendere pubblicazioni di JW.org e wol.jw.org.
+Usa soltanto il testo ufficiale fornito nel contesto della richiesta. Non inventare
+citazioni, riferimenti o contenuti e non presentare la tua conoscenza generale come
+una fonte ufficiale. Se il testo disponibile non basta per rispondere, dillo con
+gentilezza e chiedi un link o un estratto pertinente.
+""".strip()
 
-chat_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction=SYSTEM_PROMPT
-)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Ciao, fratello! Sono pronto ad aiutarti nelle ricerche su JW.org e WOL. "
-        "Inviami un link di un articolo di JW.org o fammi una domanda per approfondire insieme."
-    )
+@app.get("/")
+def index():
+    return "Bot JW online" if bot_ready.is_set() else "Servizio web online; bot in avvio", 200
 
-def fetch_jw_article_text(url):
+
+@app.get("/health")
+def health():
+    if not bot_ready.is_set():
+        return {"status": "starting"}, 503
+    return {"status": "ok"}, 200
+
+
+def extract_jw_url(message: str) -> str | None:
+    for candidate in re.findall(r"https?://[^\s<>]+", message, flags=re.IGNORECASE):
+        candidate = candidate.rstrip(".,;:!?)]}\"'")
+        try:
+            parsed = urlsplit(candidate)
+            hostname = (parsed.hostname or "").lower()
+        except ValueError:
+            continue
+        if parsed.scheme in {"http", "https"} and (hostname == "jw.org" or hostname.endswith(".jw.org")):
+            return candidate
+    return None
+
+
+def fetch_jw_article_text(url: str) -> str | None:
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return None
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # JW.org utilizza classi specifiche come 'bodyTxt' o 'docBody' per i testi degli articoli
-        body_container = soup.find('div', class_=['bodyTxt', 'docBody', 'article-body'])
-        
-        if body_container:
-            paragraphs = body_container.find_all(['p', 'li'])
-            text = " ".join([p.get_text().strip() for p in paragraphs if p.get_text().strip()])
-            if text:
-                return text[:8000] # Limite per sicurezza
-                
-        # Fallback generale se la classe specifica non viene trovata
-        paragraphs = soup.find_all('p')
-        text = " ".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 30])
-        return text[:8000] if text else None
-        
-    except Exception as e:
-        logging.error(f"Errore durante il recupero dell'articolo: {e}")
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; JWSchillBot/1.0)"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        for selector in ("div.bodyTxt", "div.docBody", "div.article-body", "article"):
+            container = soup.select_one(selector)
+            if container:
+                text = " ".join(p.get_text(" ", strip=True) for p in container.find_all(["p", "li"]))
+                if text:
+                    return text[:12000]
+        text = " ".join(p.get_text(" ", strip=True) for p in soup.find_all("p") if len(p.get_text(strip=True)) > 30)
+        return text[:12000] if text else None
+    except requests.RequestException as exc:
+        logger.warning("Recupero pagina JW.org non riuscito: %s", exc)
         return None
 
-def ask_gemini(prompt):
-    chat = chat_model.start_chat()
-    response = chat.send_message(prompt)
-    return response.text
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    if "jw.org" in text.lower():
-        await update.message.reply_text("Un attimo fratello, sto leggendo l'articolo direttamente da JW.org...")
-        
-        # Estrae l'URL dal messaggio
-        import re
-        urls = re.findall(r'(https?://[^\s]+)', text)
-        target_url = urls[0] if urls else text
-        
-        article_text = await asyncio.to_thread(fetch_jw_article_text, target_url)
-        
+def ask_gemini(prompt: str) -> str:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.4,
+            max_output_tokens=1200,
+        ),
+    )
+    answer = (response.text or "").strip()
+    if not answer:
+        raise RuntimeError("Gemini ha restituito una risposta vuota")
+    return answer
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(
+            "Ciao, fratello! Inviami un link a una pubblicazione di JW.org o WOL "
+            "oppure un estratto da approfondire."
+        )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    url = extract_jw_url(text)
+    if url:
+        await update.message.reply_text("Leggo la pagina, fratello…")
+        article_text = await asyncio.to_thread(fetch_jw_article_text, url)
         if article_text:
-            prompt = f"Analizza questo testo estratto da un articolo ufficiale di JW.org e fornisci un riassunto chiaro, approfondito e con un tono caloroso e fraterno:\n\n{article_text}"
+            prompt = (
+                f"Rispondi alla richiesta dell'utente usando esclusivamente il testo "
+                f"della pubblicazione qui sotto. Se il testo non contiene elementi "
+                f"sufficienti, dichiaralo.\n\nRichiesta: {text}\n\n"
+                f"Testo della pagina ({url}):\n{article_text}"
+            )
         else:
-            prompt = f"L'utente ha condiviso questo link di JW.org ({target_url}), ma non sono riuscito a estrarre il testo HTML. Fornisci comunque un approfondimento edificante basandoti sulla tua conoscenza di questo argomento in base alle pubblicazioni di JW.org."
-            
+            prompt = (
+                f"Non è stato possibile leggere la pagina {url}. Spiega con gentilezza "
+                "che non puoi verificare il contenuto e chiedi all'utente di incollare "
+                "il passaggio o inviare un altro link JW.org/WOL. Non rispondere usando "
+                f"conoscenze non verificate. Richiesta: {text}"
+            )
     else:
-        await update.message.reply_text("Ricerca in corso tra le pubblicazioni di JW.org e WOL, fratello...")
-        prompt = f"Rispondi alla seguente domanda basandoti rigorosamente sulle pubblicazioni di JW.org e wol.jw.org: {text}"
+        prompt = (
+            "L'utente non ha fornito una pubblicazione o un estratto ufficiale. "
+            "Chiedigli con gentilezza di inviare un link JW.org/WOL o il testo da "
+            f"approfondire. Non inventare una ricerca né una risposta basata su fonti.\n\n{text}"
+        )
 
-    response_text = await asyncio.to_thread(ask_gemini, prompt)
-    await update.message.reply_text(response_text)
-
-def run_telegram_bot():
     try:
-        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
-    except Exception as e:
-        logging.error(f"Errore pulizia webhook: {e}")
+        answer = await asyncio.to_thread(ask_gemini, prompt)
+    except Exception:
+        logger.exception("Errore durante la richiesta a Gemini")
+        await update.message.reply_text(
+            "In questo momento non riesco a completare la risposta. Riprova tra poco."
+        )
+        return
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Telegram accetta al massimo 4096 caratteri per messaggio.
+    for offset in range(0, len(answer), 3900):
+        await update.message.reply_text(answer[offset : offset + 3900])
+
+
+async def remove_old_webhook(application: Application) -> None:
+    # Necessario se il bot era stato configurato in precedenza per webhook.
+    await application.bot.delete_webhook(drop_pending_updates=False)
+    bot_ready.set()
+
+
+def run_web_server() -> None:
+    app.run(host="0.0.0.0", port=PORT, threaded=True, use_reloader=False)
+
+
+def main() -> None:
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("Variabile TELEGRAM_TOKEN mancante")
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Variabile GEMINI_API_KEY mancante")
+
+    threading.Thread(target=run_web_server, name="health-server", daemon=True).start()
+
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(remove_old_webhook)
+        .build()
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.run_polling()
+    logger.info("Avvio polling Telegram; modello Gemini configurato: %s", GEMINI_MODEL)
+    application.run_polling(drop_pending_updates=False)
+
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
-    bot_thread.start()
-    
-    app.run(host="0.0.0.0", port=PORT)
+    main()
