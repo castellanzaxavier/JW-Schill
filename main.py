@@ -6,7 +6,6 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 import google.generativeai as genai
 import requests
-from bs4 import BeautifulSoup
 import asyncio
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -38,7 +37,7 @@ chat_model = genai.GenerativeModel(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Ciao, fratello! Sono pronto ad aiutarti nelle ricerche su JW.org e WOL. "
-        "Fammi una domanda o inviami un argomento/link per approfondire insieme."
+        "Fammi una domanda o inviami un link di JW.org per approfondire insieme."
     )
 
 def ask_gemini(prompt):
@@ -50,8 +49,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     if "jw.org" in text.lower():
-        await update.message.reply_text("Un attimo fratello, sto esaminando il contenuto alla luce delle pubblicazioni di JW.org...")
-        prompt = f"L'utente ha condiviso questo link o riferimento di JW.org: '{text}'. Analizzalo e fornisci un riassunto o una spiegazione edificante e fraterna basandoti rigorosamente sugli insegnamenti di JW.org e wol.jw.org."
+        await update.message.reply_text("Un attimo fratello, sto esaminando il link alla luce delle pubblicazioni ufficiali...")
+        # Sfruttiamo la logica basata sugli endpoint e sulla profonda conoscenza di Gemini guidata dal link
+        prompt = f"L'utente ha condiviso questo link ufficiale di JW.org: '{text}'. Fornisci un'analisi dettagliata, un riassunto e un approfondimento edificante e fraterno basandoti rigorosamente sugli insegnamenti di JW.org e wol.jw.org."
     else:
         await update.message.reply_text("Ricerca in corso tra le pubblicazioni di JW.org e WOL, fratello...")
         prompt = f"Rispondi alla seguente domanda basandoti rigorosamente sulle pubblicazioni di JW.org e wol.jw.org: {text}"
