@@ -189,7 +189,7 @@ def transcript(video):
             if cue and (not cues or cue != cues[-1]):
                 cues.append(cue)
         text = "\n".join(cues)
-        return (text[:38000], sub_url) if text else None
+        return (text[:55000], sub_url) if text else None
     except requests.RequestException as exc:
         logger.warning("Sottotitoli JW non recuperabili: %s", exc)
         return None
@@ -224,12 +224,12 @@ def research(query, user_url):
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
             sources.append(result["url"])
     sources = list(dict.fromkeys(sources))
-    return "\n\n---\n\n".join(chunks)[:60000], sources
+    return "\n\n---\n\n".join(chunks)[:85000], sources
 
 def ask_gemini(prompt):
     client = genai.Client(api_key=GEMINI_API_KEY)
     result = client.models.generate_content(model=GEMINI_MODEL, contents=prompt,
-        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.35, max_output_tokens=1800))
+        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.35, max_output_tokens=3000))
     answer = (result.text or "").strip()
     if not answer:
         raise RuntimeError("Gemini ha restituito una risposta vuota")
@@ -254,7 +254,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if material:
         links = "\n".join(f"- {source}" for source in sources)
         prompt = ("Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
-                  "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni, paragrafi brevi separati da righe vuote e punti elenco con •. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non menzionare sottotitoli o trascrizioni. Rispondi in modo esauriente, ordinato e fedele alla fonte. "
+                  "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
     else:
