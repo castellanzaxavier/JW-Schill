@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
@@ -68,26 +69,30 @@ def extract_jw_video_transcript(url):
         logging.error(f"Errore estrazione video: {e}")
         return None
 
+def ask_gemini(prompt):
+    chat = chat_model.start_chat()
+    response = chat.send_message(prompt)
+    return response.text
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if "jw.org" in text.lower():
         await update.message.reply_text("Un attimo fratello, sto esaminando il video e i sottotitoli...")
-        transcript = extract_jw_video_transcript(text)
+        transcript = await asyncio.to_thread(extract_jw_video_transcript, text)
         if transcript:
             prompt = f"Analizza questo testo/trascrizione tratto da un video di JW.org e riassumi in modo fraterno e chiaro di cosa parla:\n\n{transcript}"
-            response = chat_model.start_chat().send_message(prompt)
-            await update.message.reply_text(response.text)
+            response_text = await asyncio.to_thread(ask_gemini, prompt)
+            await update.message.reply_text(response_text)
         else:
             await update.message.reply_text("Fratello, non sono riuscito a estrarre i sottotitoli o il testo da questo link specifico.")
         return
 
     await update.message.reply_text("Ricerca in corso tra le pubblicazioni di JW.org e WOL, fratello...")
     prompt = f"Rispondi alla seguente domanda basandoti rigorosamente sulle pubblicazioni di JW.org e wol.jw.org: {text}"
-    response = chat_model.start_chat().send_message(prompt)
-    await update.message.reply_text(response.text)
+    response_text = await asyncio.to_thread(ask_gemini, prompt)
+    await update.message.reply_text(response_text)
 
 def run_telegram_bot():
-    # Pulisce eventuali blocchi di vecchi webhook sui server di Telegram
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
     except Exception as e:
@@ -99,9 +104,7 @@ def run_telegram_bot():
     application.run_polling()
 
 if __name__ == "__main__":
-    # Avvia il bot di Telegram in sottofondo
     bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     bot_thread.start()
     
-    # Avvia Flask sul thread principale per Render
     app.run(host="0.0.0.0", port=PORT)
