@@ -6,6 +6,8 @@ import os
 import re
 import threading
 import unicodedata
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
 import requests
@@ -139,6 +141,40 @@ def search_wol(query, limit=4):
         logger.warning("Ricerca WOL non riuscita: %s", exc)
         return []
 
+def weekly_congregation_study(query):
+    """Recupera il programma corrente e il capitolo dello Studio biblico di congregazione."""
+    q = normalize(query)
+    if "studio di congregazione" not in q:
+        return None
+    if not any(term in q for term in ("settimana", "sta settimana", "questa settimana", "della settimana")):
+        return None
+
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+    monday = today - timedelta(days=today.weekday())
+    url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
+    schedule = fetch_page(url)
+    if not schedule:
+        logger.warning("Programma settimanale WOL non recuperabile: %s", url)
+        return None
+
+    chunks = [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{schedule}"]
+    sources = [url]
+    chapter = re.search(r"\bwcg\s+cap\.?\s*(\d+)\b", schedule, flags=re.I)
+    if chapter:
+        number = chapter.group(1)
+        results = search_wol(f"wcg cap. {number}", limit=8)
+        for result in results:
+            content = fetch_page(result["url"])
+            if content and ("per parlarne insieme" in normalize(content) or "la tua risposta" in normalize(content)):
+                chunks.append(f"CAPITOLO {number} DEL LIBRO INDICATO DAL PROGRAMMA: {result['title']}\nURL: {result['url']}\n{content}")
+                sources.append(result["url"])
+                break
+        if len(sources) == 1:
+            logger.warning("Capitolo wcg %s non trovato nei risultati WOL", number)
+    else:
+        logger.warning("Il programma settimanale non indica un capitolo wcg")
+    return chunks, sources
+
 def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
     return "".join(ch for ch in value if not unicodedata.combining(ch))
@@ -213,12 +249,17 @@ def research(query, user_url):
         else:
             chunks.append(f"Trovato il video ufficiale {title}, ma non sono riuscito a recuperare il testo completo.")
             sources.append(video_url)
+    weekly_material = weekly_congregation_study(query)
+    if weekly_material:
+        weekly_chunks, weekly_sources = weekly_material
+        chunks.extend(weekly_chunks)
+        sources.extend(weekly_sources)
     if user_url:
         page_text = fetch_page(user_url)
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in search_wol(query):
+    for result in ([] if weekly_material else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -253,7 +294,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     material, sources = await asyncio.to_thread(research, text, url)
     if material:
         links = "\n".join(f"- {source}" for source in sources)
-        prompt = ("Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
+        weekly_instructions = ""
+        if "studio di congregazione" in normalize(text):
+            weekly_instructions = ("È una richiesta sulle domande dello Studio biblico di congregazione della settimana. Usa il programma per identificare il capitolo e rispondi in ordine a tutte le domande del capitolo, comprese le sezioni di approfondimento, applicazione e prospettiva. Mantieni ogni risposta semplice, naturale e adatta a essere detta in meno di 20 secondi (massimo circa 35 parole). Usa un tono caldo e concreto, senza fingere di essere una persona reale.\n\n")
+        prompt = (weekly_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
