@@ -170,7 +170,7 @@ def is_weekly_study_request(query):
     return study_type and "settimana" in q
 
 def weekly_study_material(query):
-    """Segue la guida ufficiale corrente e recupera il capitolo o l’articolo assegnato."""
+    """Recupera dal calendario WOL il capitolo o l’articolo assegnato alla settimana corrente."""
     q = normalize(query)
     if not is_weekly_study_request(query):
         return None
@@ -182,8 +182,7 @@ def weekly_study_material(query):
         date_response = requests.get(date_url, headers=HEADERS, timeout=20)
         date_response.raise_for_status()
         date_soup = BeautifulSoup(date_response.text, "html.parser")
-        date_main = date_soup.select_one("#regionMain") or date_soup
-        guide_link = next((a for a in date_main.select("a[href]")
+        guide_link = next((a for a in date_soup.select("a[href]")
                            if "guida per l" in normalize(a.get_text(" ", strip=True))
                            and "vita e ministero" in normalize(a.get_text(" ", strip=True))), None)
         if not guide_link:
@@ -192,34 +191,30 @@ def weekly_study_material(query):
         guide_url = urljoin(date_response.url, guide_link.get("href", ""))
         if not official_url(guide_url):
             return None
-        guide_response = requests.get(guide_url, headers=HEADERS, timeout=20)
-        guide_response.raise_for_status()
-        guide_soup = BeautifulSoup(guide_response.text, "html.parser")
-        guide_main = guide_soup.select_one("#regionMain") or guide_soup
     except requests.RequestException as exc:
-        logger.warning("Guida settimanale WOL non recuperabile: %s", exc)
+        logger.warning("Programma settimanale WOL non recuperabile: %s", exc)
         return None
 
     document_url = None
     context = ""
     if congregation:
-        for link in guide_main.select("a[href]"):
+        for link in date_soup.select("a[href]"):
             label = link.get_text(" ", strip=True)
             if re.search(r"\bwcg\s+cap\.?\s*\d+\b", normalize(label), flags=re.I):
-                document_url = urljoin(guide_response.url, link.get("href", ""))
+                document_url = urljoin(date_response.url, link.get("href", ""))
                 context = clean_text(str(link.parent))
                 break
     else:
-        marker = next((h for h in guide_main.find_all(re.compile(r"^h[1-6]$"))
+        marker = next((h for h in date_soup.find_all(re.compile(r"^h[1-6]$"))
                        if "articolo di studio" in normalize(h.get_text(" ", strip=True))), None)
         if marker:
             link = marker.find_next("a", href=True)
             if link:
-                document_url = urljoin(guide_response.url, link.get("href", ""))
+                document_url = urljoin(date_response.url, link.get("href", ""))
                 context = marker.get_text(" ", strip=True)
 
     if not document_url or not official_url(document_url):
-        logger.warning("Capitolo o articolo non individuato nella guida WOL: %s", guide_url)
+        logger.warning("Capitolo o articolo non individuato nella pagina WOL: %s", date_url)
         return None
     fetched = fetch_page_long(document_url, with_url=True)
     if not fetched:
@@ -351,7 +346,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         links = "\n".join(f"🔗 {source}" for source in sources)
         weekly_instructions = ""
         if is_weekly_study_request(text):
-            weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente e metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Anteponi ❓ a ogni domanda e 💬 a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
+            weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta e metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni “Scopri di più” e “Come rispondereste”, se presenti; prima di concludere controlla di non averne saltata nessuna. Anteponi ❓ a ogni domanda e 💬 a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
         prompt = (weekly_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
