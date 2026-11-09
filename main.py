@@ -161,39 +161,82 @@ def search_wol(query, limit=4):
         logger.warning("Ricerca WOL non riuscita: %s", exc)
         return []
 
-def weekly_congregation_study(query):
-    """Recupera il programma corrente e il capitolo dello Studio biblico di congregazione."""
+def is_weekly_study_request(query):
     q = normalize(query)
-    if "studio di congregazione" not in q:
+    study_type = "studio di congregazione" in q or "studio biblico di congregazione" in q or "torre di guardia" in q
+    return study_type and "settimana" in q
+
+def weekly_study_material(query):
+    """Recupera il programma della settimana e il capitolo/articolo oggetto dello studio."""
+    q = normalize(query)
+    if not is_weekly_study_request(query):
         return None
-    if not any(term in q for term in ("settimana", "sta settimana", "questa settimana", "della settimana")):
-        return None
+    congregation = "studio di congregazione" in q or "studio biblico di congregazione" in q
+    watchtower = "torre di guardia" in q
 
     today = datetime.now(ZoneInfo("Europe/Rome")).date()
     monday = today - timedelta(days=today.weekday())
-    url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
-    schedule = fetch_page_long(url)
+    schedule_url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
+    try:
+        response = requests.get(schedule_url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        main = soup.select_one("#regionMain") or soup
+        schedule = clean_text(str(main))
+    except requests.RequestException as exc:
+        logger.warning("Programma settimanale WOL non recuperabile: %s", exc)
+        return None
     if not schedule:
-        logger.warning("Programma settimanale WOL non recuperabile: %s", url)
         return None
 
-    chapter = re.search(r"\bwcg\s+cap\.?\s*(\d+)\b", schedule, flags=re.I)
-    if not chapter:
-        logger.warning("Capitolo dello studio non trovato nel programma WOL: %s", url)
+    document_url = None
+    context = ""
+    if congregation:
+        for link in main.select("a[href]"):
+            label = link.get_text(" ", strip=True)
+            if re.search(r"\bwcg\s+cap\.?\s*\d+\b", normalize(label), flags=re.I):
+                document_url = urljoin(response.url, link.get("href", ""))
+                context = clean_text(str(link.parent.parent if link.parent and link.parent.parent else link.parent))
+                break
+        if not document_url:
+            chapter = re.search(r"\bwcg\s+cap\.?\s*(\d+)\b", schedule, flags=re.I)
+            if chapter:
+                for result in search_wol(f"wcg cap. {chapter.group(1)}", limit=8):
+                    if re.search(r"wcg\s+cap", normalize(result.get("snippet", "")), flags=re.I):
+                        document_url = result["url"]
+                        context = f"Studio biblico di congregazione: capitolo {chapter.group(1)}"
+                        break
+    elif watchtower:
+        marker = None
+        for heading in main.find_all(re.compile(r"^h[1-6]$")):
+            if "articolo di studio" in normalize(heading.get_text(" ", strip=True)):
+                marker = heading
+                break
+        if marker:
+            link = marker.find_next("a", href=True)
+            if link:
+                document_url = urljoin(response.url, link.get("href", ""))
+                context = clean_text(str(marker.parent))
+        if not document_url:
+            for marker in main.find_all(["p", "div", "span"]):
+                label = marker.get_text(" ", strip=True)
+                if "articolo di studio" in normalize(label) and len(label) < 160:
+                    link = marker.find_next("a", href=True)
+                    if link:
+                        document_url = urljoin(response.url, link.get("href", ""))
+                        context = label
+                        break
+
+    if not document_url or not official_url(document_url) or "/wol/d/" not in urlsplit(document_url).path:
+        logger.warning("Articolo settimanale non individuato nel programma WOL: %s", schedule_url)
         return None
-
-    number = chapter.group(1)
-    results = search_wol(f"wcg cap. {number}", limit=8)
-    for result in results:
-        content = fetch_page_long(result["url"])
-        if content and ("per parlarne insieme" in normalize(content) or "la tua risposta" in normalize(content)):
-            relevant_schedule = schedule[max(0, chapter.start() - 250):chapter.end() + 250]
-            chunks = [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{relevant_schedule}",
-                      f"CAPITOLO {number} DEL LIBRO INDICATO DAL PROGRAMMA: {result['title']}\nURL: {result['url']}\n{content}"]
-            return chunks, [url, result["url"]]
-
-    logger.warning("Capitolo wcg %s non trovato nei risultati WOL", number)
-    return None
+    document = fetch_page_long(document_url)
+    if not document:
+        logger.warning("Testo dello studio settimanale non recuperabile: %s", document_url)
+        return None
+    kind = "Studio biblico di congregazione" if congregation else "Torre di Guardia per lo studio"
+    return [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{context}",
+            f"TESTO COMPLETO DELLO STUDIO ({kind}):\n{document}"], [schedule_url, document_url]
 
 def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
@@ -269,7 +312,7 @@ def research(query, user_url):
         else:
             chunks.append(f"Trovato il video ufficiale {title}, ma non sono riuscito a recuperare il testo completo.")
             sources.append(video_url)
-    weekly_material = weekly_congregation_study(query)
+    weekly_material = weekly_study_material(query)
     if weekly_material:
         weekly_chunks, weekly_sources = weekly_material
         chunks.extend(weekly_chunks)
@@ -279,7 +322,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if weekly_material else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -313,17 +356,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cerco nelle fonti ufficiali e preparo la risposta…")
     material, sources = await asyncio.to_thread(research, text, url)
     if material:
-        links = "\n".join(f"- {source}" for source in sources)
+        links = "\n".join(f"🔗 {source}" for source in sources)
         weekly_instructions = ""
-        if "studio di congregazione" in normalize(text):
-            weekly_instructions = ("È una richiesta sulle domande dello Studio biblico di congregazione della settimana. Usa il programma per identificare il capitolo e rispondi in ordine a tutte le domande del capitolo, comprese le sezioni di approfondimento, applicazione e prospettiva. Mantieni ogni risposta semplice, naturale e adatta a essere detta in meno di 20 secondi (massimo circa 35 parole). Usa un tono caldo e concreto, senza fingere di essere una persona reale.\n\n")
+        if is_weekly_study_request(text):
+            weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente e metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Anteponi ❓ a ogni domanda e 💬 a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
         prompt = (weekly_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
     else:
-        prompt = ("La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi "
-                  "un link JW.org/WOL preciso o un estratto. Non inventare. Non aggiungere saluti o benedizioni.\n\n" + text)
+        prompt = (("Non sono riuscito a recuperare la pubblicazione corretta per questa settimana dalle fonti ufficiali. Dillo chiaramente e chiedi il link JW.org/WOL della pubblicazione; non rispondere usando materiale di un’altra settimana o una sezione diversa. Non inventare e non aggiungere saluti o benedizioni.\n\n" if is_weekly_study_request(text) else "La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi un link JW.org/WOL preciso o un estratto. Non inventare. Non aggiungere saluti o benedizioni.\n\n") + text)
     try:
         answer = await asyncio.to_thread(ask_gemini, prompt)
     except Exception:
