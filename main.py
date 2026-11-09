@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import asyncio
+import re
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
@@ -15,7 +16,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Server web Flask per mantenere felice Render sulla porta
 app = Flask(__name__)
 
 @app.route("/")
@@ -23,7 +23,6 @@ def index():
     return "Bot JW attivo e operativo nel cloud!"
 
 genai.configure(api_key=GEMINI_API_KEY)
-generation_config = {"temperature": 0.3}
 
 SYSTEM_PROMPT = """
 Sei un assistente virtuale fraterno, parli con un tono caloroso, rispettoso, edificante e fraterno (ti rivolgi all'utente chiamandolo "fratello" o con affetto cristiano).
@@ -39,34 +38,50 @@ chat_model = genai.GenerativeModel(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Ciao, fratello! Sono pronto ad aiutarti nelle ricerche su JW.org e WOL. "
-        "Fammi una domanda o inviami il link di un video di JW.org per sapere di cosa parla."
+        "Fammi una domanda o inviami il link di un video o articolo di JW.org per sapere di cosa parla."
     )
 
-def extract_jw_video_transcript(url):
+def extract_jw_content(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        transcript_text = ""
-        for a in soup.find_all('a', href=True):
-            if '.vtt' in a['href']:
-                vtt_url = a['href']
-                if not vtt_url.startswith('http'):
-                    vtt_url = "https://www.jw.org" + vtt_url
-                vtt_resp = requests.get(vtt_url, headers=headers)
-                if vtt_resp.status_code == 200:
-                    transcript_text += vtt_resp.text + "\n"
         
-        if not transcript_text:
-            paragraphs = soup.find_all('p')
-            transcript_text = " ".join([p.get_text() for p in paragraphs])
+        # 1. Cerca sottotitoli .vtt direttamente nella pagina
+        vtt_urls = []
+        for a in soup.find_all(['a', 'source', 'track'], href=True):
+            if '.vtt' in a['href']:
+                vtt_urls.append(a['href'])
+        for track in soup.find_all('track', src=True):
+            if '.vtt' in track['src']:
+                vtt_urls.append(track['src'])
+                
+        if vtt_urls:
+            vtt_url = vtt_urls[0]
+            if not vtt_url.startswith('http'):
+                vtt_url = "https://www.jw.org" + vtt_url
+            vtt_resp = requests.get(vtt_url, headers=headers, timeout=10)
+            if vtt_resp.status_code == 200:
+                # Pulisce i tag di tempo VTT per lasciare solo il testo
+                clean_text = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}', '', vtt_resp.text)
+                clean_text = re.sub(r'<[^>]+>', '', clean_text)
+                lines = [line.strip() for line in clean_text.splitlines() if line.strip() and not line.strip().isdigit() and line.strip() != "WEBVTT"]
+                return " ".join(lines)[:8000]
+
+        # 2. Se è un articolo o pagina testo, estrai i paragrafi principali
+        article = soup.find('article') or soup.find('main') or soup
+        paragraphs = article.find_all('p')
+        text_content = " ".join([p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 20])
+        
+        if text_content:
+            return text_content[:8000]
             
-        return transcript_text[:10000]
+        return None
     except Exception as e:
-        logging.error(f"Errore estrazione video: {e}")
+        logging.error(f"Errore estrazione testo: {e}")
         return None
 
 def ask_gemini(prompt):
@@ -76,17 +91,26 @@ def ask_gemini(prompt):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    
+    # Se l'utente invia un link di JW.org
     if "jw.org" in text.lower():
-        await update.message.reply_text("Un attimo fratello, sto esaminando il video e i sottotitoli...")
-        transcript = await asyncio.to_thread(extract_jw_video_transcript, text)
-        if transcript:
-            prompt = f"Analizza questo testo/trascrizione tratto da un video di JW.org e riassumi in modo fraterno e chiaro di cosa parla:\n\n{transcript}"
+        await update.message.reply_text("Un attimo fratello, sto leggendo il contenuto dal link di JW.org...")
+        
+        # Estrai l'URL dal messaggio
+        urls = re.findall(r'(https?://[^\s]+)', text)
+        target_url = urls[0] if urls else text
+        
+        extracted_text = await asyncio.to_thread(extract_jw_content, target_url)
+        
+        if extracted_text:
+            prompt = f"Analizza questo testo tratto da JW.org e fai un riassunto chiaro, incoraggiante e fraterno:\n\n{extracted_text}"
             response_text = await asyncio.to_thread(ask_gemini, prompt)
             await update.message.reply_text(response_text)
         else:
-            await update.message.reply_text("Fratello, non sono riuscito a estrarre i sottotitoli o il testo da questo link specifico.")
+            await update.message.reply_text("Fratello, non sono riuscito ad estrarre il testo da questo specifico link. Prova con un altro articolo o video di JW.org!")
         return
 
+    # Domanda generale
     await update.message.reply_text("Ricerca in corso tra le pubblicazioni di JW.org e WOL, fratello...")
     prompt = f"Rispondi alla seguente domanda basandoti rigorosamente sulle pubblicazioni di JW.org e wol.jw.org: {text}"
     response_text = await asyncio.to_thread(ask_gemini, prompt)
