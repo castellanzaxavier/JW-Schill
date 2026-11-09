@@ -1,34 +1,18 @@
 import os
 import logging
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
+import requests
+from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 import google.generativeai as genai
-import requests
-from bs4 import BeautifulSoup
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
-
-# Piccolo server HTTP integrato per soddisferà all'istante la porta di Render
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot JW attivo nel cloud!")
-    def log_message(self, format, *args):
-        pass
-
-def run_http_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-    server.serve_forever()
-
-# Avvia subito il server web di cortesia in background
-threading.Thread(target=run_http_server, daemon=True).start()
+RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 
 genai.configure(api_key=GEMINI_API_KEY)
 generation_config = {"temperature": 0.3}
@@ -95,13 +79,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = chat_model.start_chat().send_message(prompt)
     await update.message.reply_text(response.text)
 
-def main():
+async def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    application.run_polling()
+    # Se siamo su Render, usa il webhook nativo che apre automaticamente la porta richiesta
+    if RENDER_EXTERNAL_HOSTNAME:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_TOKEN}"
+        )
+        # Mantiene il bot in ascolto nel cloud
+        stop_event = asyncio.Event()
+        await stop_event.wait()
+    else:
+        # Se lo provi in locale sul PC
+        await application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
