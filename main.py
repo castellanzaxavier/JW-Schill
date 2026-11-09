@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
-# Inizializziamo Flask sul thread principale per soddisfare Render all'istante
+# Server web Flask per mantenere felice Render sulla porta
 app = Flask(__name__)
 
 @app.route("/")
@@ -87,15 +87,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response.text)
 
 def run_telegram_bot():
+    # Pulisce eventuali blocchi di vecchi webhook sui server di Telegram
+    try:
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook", timeout=10)
+    except Exception as e:
+        logging.error(f"Errore pulizia webhook: {e}")
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()
 
 if __name__ == "__main__":
-    # Avviamo il bot di Telegram in background
+    # Avvia il bot di Telegram in sottofondo
     bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     bot_thread.start()
     
-    # Avviamo Flask sul thread principale (così Render rileva subito la porta aperta)
+    # Avvia Flask sul thread principale per Render
     app.run(host="0.0.0.0", port=PORT)
