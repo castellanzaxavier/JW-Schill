@@ -20,6 +20,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=os.environ.get("LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
@@ -108,8 +110,8 @@ def fetch_page(url):
         logger.info("Pagina JW non recuperabile: %s", exc)
         return None
 
-def fetch_page_long(url, limit=60000):
-    """Estrae il testo completo delle pagine WOL che contengono capitoli e domande."""
+def fetch_page_long(url, limit=60000, with_url=False):
+    """Estrae il testo completo delle pagine WOL e, se richiesto, l’URL finale dopo i reindirizzamenti."""
     if not official_url(url):
         return None
     try:
@@ -121,9 +123,10 @@ def fetch_page_long(url, limit=60000):
             if node:
                 text = clean_text(str(node))
                 if text:
-                    return text[:limit]
-        text = clean_text(str(soup))
-        return text[:limit] or None
+                    text = text[:limit]
+                    return (text, r.url) if with_url else text
+        text = clean_text(str(soup))[:limit]
+        return (text, r.url) if with_url and text else text or None
     except requests.RequestException as exc:
         logger.info("Pagina JW completa non recuperabile: %s", exc)
         return None
@@ -167,76 +170,65 @@ def is_weekly_study_request(query):
     return study_type and "settimana" in q
 
 def weekly_study_material(query):
-    """Recupera il programma della settimana e il capitolo/articolo oggetto dello studio."""
+    """Segue la guida ufficiale corrente e recupera il capitolo o l’articolo assegnato."""
     q = normalize(query)
     if not is_weekly_study_request(query):
         return None
     congregation = "studio di congregazione" in q or "studio biblico di congregazione" in q
-    watchtower = "torre di guardia" in q
-
     today = datetime.now(ZoneInfo("Europe/Rome")).date()
     monday = today - timedelta(days=today.weekday())
-    schedule_url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
+    date_url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
     try:
-        response = requests.get(schedule_url, headers=HEADERS, timeout=20)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        main = soup.select_one("#regionMain") or soup
-        schedule = clean_text(str(main))
+        date_response = requests.get(date_url, headers=HEADERS, timeout=20)
+        date_response.raise_for_status()
+        date_soup = BeautifulSoup(date_response.text, "html.parser")
+        date_main = date_soup.select_one("#regionMain") or date_soup
+        guide_link = next((a for a in date_main.select("a[href]")
+                           if "guida per l" in normalize(a.get_text(" ", strip=True))
+                           and "vita e ministero" in normalize(a.get_text(" ", strip=True))), None)
+        if not guide_link:
+            logger.warning("Guida settimanale non collegata dalla pagina WOL: %s", date_url)
+            return None
+        guide_url = urljoin(date_response.url, guide_link.get("href", ""))
+        if not official_url(guide_url):
+            return None
+        guide_response = requests.get(guide_url, headers=HEADERS, timeout=20)
+        guide_response.raise_for_status()
+        guide_soup = BeautifulSoup(guide_response.text, "html.parser")
+        guide_main = guide_soup.select_one("#regionMain") or guide_soup
     except requests.RequestException as exc:
-        logger.warning("Programma settimanale WOL non recuperabile: %s", exc)
-        return None
-    if not schedule:
+        logger.warning("Guida settimanale WOL non recuperabile: %s", exc)
         return None
 
     document_url = None
     context = ""
     if congregation:
-        for link in main.select("a[href]"):
+        for link in guide_main.select("a[href]"):
             label = link.get_text(" ", strip=True)
             if re.search(r"\bwcg\s+cap\.?\s*\d+\b", normalize(label), flags=re.I):
-                document_url = urljoin(response.url, link.get("href", ""))
-                context = clean_text(str(link.parent.parent if link.parent and link.parent.parent else link.parent))
+                document_url = urljoin(guide_response.url, link.get("href", ""))
+                context = clean_text(str(link.parent))
                 break
-        if not document_url:
-            chapter = re.search(r"\bwcg\s+cap\.?\s*(\d+)\b", schedule, flags=re.I)
-            if chapter:
-                for result in search_wol(f"wcg cap. {chapter.group(1)}", limit=8):
-                    if re.search(r"wcg\s+cap", normalize(result.get("snippet", "")), flags=re.I):
-                        document_url = result["url"]
-                        context = f"Studio biblico di congregazione: capitolo {chapter.group(1)}"
-                        break
-    elif watchtower:
-        marker = None
-        for heading in main.find_all(re.compile(r"^h[1-6]$")):
-            if "articolo di studio" in normalize(heading.get_text(" ", strip=True)):
-                marker = heading
-                break
+    else:
+        marker = next((h for h in guide_main.find_all(re.compile(r"^h[1-6]$"))
+                       if "articolo di studio" in normalize(h.get_text(" ", strip=True))), None)
         if marker:
             link = marker.find_next("a", href=True)
             if link:
-                document_url = urljoin(response.url, link.get("href", ""))
-                context = clean_text(str(marker.parent))
-        if not document_url:
-            for marker in main.find_all(["p", "div", "span"]):
-                label = marker.get_text(" ", strip=True)
-                if "articolo di studio" in normalize(label) and len(label) < 160:
-                    link = marker.find_next("a", href=True)
-                    if link:
-                        document_url = urljoin(response.url, link.get("href", ""))
-                        context = label
-                        break
+                document_url = urljoin(guide_response.url, link.get("href", ""))
+                context = marker.get_text(" ", strip=True)
 
-    if not document_url or not official_url(document_url) or "/wol/d/" not in urlsplit(document_url).path:
-        logger.warning("Articolo settimanale non individuato nel programma WOL: %s", schedule_url)
+    if not document_url or not official_url(document_url):
+        logger.warning("Capitolo o articolo non individuato nella guida WOL: %s", guide_url)
         return None
-    document = fetch_page_long(document_url)
-    if not document:
+    fetched = fetch_page_long(document_url, with_url=True)
+    if not fetched:
         logger.warning("Testo dello studio settimanale non recuperabile: %s", document_url)
         return None
+    document, final_url = fetched
     kind = "Studio biblico di congregazione" if congregation else "Torre di Guardia per lo studio"
     return [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{context}",
-            f"TESTO COMPLETO DELLO STUDIO ({kind}):\n{document}"], [schedule_url, document_url]
+            f"TESTO COMPLETO DELLO STUDIO ({kind}):\n{document}"], [guide_url, final_url]
 
 def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
