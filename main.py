@@ -166,7 +166,7 @@ def search_wol(query, limit=4):
 
 def is_weekly_study_request(query):
     q = normalize(query)
-    study_type = "studio di congregazione" in q or "studio biblico di congregazione" in q or "torre di guardia" in q
+    study_type = "studio di congregazione" in q or "studio biblico di congregazione" in q or "torre di guardia" in q or ("torre" in q and any(word in q for word in ("domande", "risposte", "studio", "articolo")))
     return study_type and "settimana" in q
 
 def weekly_study_material(query):
