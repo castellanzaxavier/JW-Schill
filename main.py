@@ -37,7 +37,7 @@ WEBHOOK_SECRET = hashlib.sha256(("JW-Schill:" + TELEGRAM_TOKEN).encode()).hexdig
 SYSTEM_PROMPT = """
 Sei un assistente virtuale fraterno e rispondi in italiano con tono rispettoso, chiaro e caloroso.
 Usa esclusivamente le fonti ufficiali e i testi forniti. Per domande su video, esamina tutti i
-sottotitoli disponibili e organizza una risposta esauriente, fedele al contenuto e pertinente alla
+testo del video disponibile e organizza una risposta esauriente, fedele al contenuto e pertinente alla
 domanda, includendo punti principali, esempi e conclusioni. Distingui le affermazioni delle fonti
 dalle spiegazioni. Non inventare citazioni o riferimenti; cita i link delle fonti forniti.
 Non concludere con saluti, benedizioni o formule di commiato. Non scrivere mai "Geova ti benedica"
@@ -208,10 +208,10 @@ def research(query, user_url):
         caption_data = transcript(video)
         if caption_data:
             caption, caption_url = caption_data
-            chunks.append(f"SOTTOTITOLI DEL VIDEO {title}:\n{caption}")
-            sources.extend([video_url, caption_url])
+            chunks.append(f"CONTENUTO DEL VIDEO {title}:\n{caption}")
+            sources.append(video_url)
         else:
-            chunks.append(f"Trovato il video ufficiale {title}, ma i sottotitoli non sono disponibili.")
+            chunks.append(f"Trovato il video ufficiale {title}, ma non sono riuscito a recuperare il testo completo.")
             sources.append(video_url)
     if user_url:
         page_text = fetch_page(user_url)
@@ -254,8 +254,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if material:
         links = "\n".join(f"- {source}" for source in sources)
         prompt = ("Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
-                  "prima di rispondere. Dai una risposta esauriente e ordinata, pertinente alla domanda. "
-                  "Aggiungi una sezione 'Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
+                  "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni, paragrafi brevi separati da righe vuote e punti elenco con •. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non menzionare sottotitoli o trascrizioni. Rispondi in modo esauriente, ordinato e fedele alla fonte. "
+                  "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
     else:
         prompt = ("La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi "
