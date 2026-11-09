@@ -169,7 +169,7 @@ def get_video(item_id):
         r = requests.get(f"{MEDIA_API}/media-items/{LANGUAGE}/{item_id}", params={"clientType": "www"}, headers=HEADERS, timeout=20)
         r.raise_for_status()
         data = r.json()
-        return data.get("media", data)
+        media = data.get("media", data); return next((item for item in media if isinstance(item, dict)), None) if isinstance(media, list) else media if isinstance(media, dict) else None
     except (requests.RequestException, ValueError) as exc:
         logger.info("Metadati video non disponibili: %s", exc)
         return None
