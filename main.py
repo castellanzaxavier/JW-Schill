@@ -359,8 +359,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Errore durante la richiesta a Gemini")
         await update.message.reply_text("In questo momento non riesco a completare la risposta. Riprova tra poco.")
         return
-    for offset in range(0, len(answer), 3900):
-        await update.message.reply_text(answer[offset:offset + 3900])
+    for chunk in re.findall(r".{1,3900}(?:\s|$)", answer, flags=re.S):
+        await update.message.reply_text(chunk.strip())
 
 async def run_webhook_bot(application):
     global telegram_loop
