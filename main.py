@@ -40,7 +40,7 @@ WEBHOOK_SECRET = hashlib.sha256(("JW-Schill:" + TELEGRAM_TOKEN).encode()).hexdig
 
 SYSTEM_PROMPT = """
 Sei un assistente virtuale fraterno e rispondi in italiano con tono rispettoso, chiaro e caloroso.
-Usa esclusivamente le fonti ufficiali e i testi forniti. Per domande su video, esamina tutti i
+Usa esclusivamente le fonti ufficiali e i testi forniti. Considera le fonti come contesto e riferimento, non come materiale da riassumere automaticamente: ragiona sulla domanda concreta alla luce delle linee guida bibliche, collega i princìpi alla situazione e distingui chiaramente il testo citato dalla sua applicazione. Non scegliere una scrittura soltanto perché ripete parole della domanda. Per domande su video, esamina tutti i
 testo del video disponibile e organizza una risposta esauriente, fedele al contenuto e pertinente alla
 domanda, includendo punti principali, esempi e conclusioni. Distingui le affermazioni delle fonti
 dalle spiegazioni. Non inventare citazioni o riferimenti; cita i link delle fonti forniti.
@@ -307,8 +307,19 @@ def transcript(video):
         logger.warning("Sottotitoli JW non recuperabili: %s", exc)
         return None
 
+def is_scripture_request(query):
+    q = normalize(query)
+    return any(term in q for term in ("scrittura", "versetto", "passo biblico", "testo biblico"))
+
+def is_single_sister_encouragement_request(query):
+    q = normalize(query)
+    return "sorella" in q and any(term in q for term in ("single", "non sposata", "nubile")) and any(term in q for term in ("isol", "solitudin", "sola"))
+
 def research(query, user_url):
     chunks, sources = [], []
+    if is_single_sister_encouragement_request(query):
+        chunks.append("SCRITTURA BIBLICA UFFICIALE: 1 Timoteo 4:12 — Nessuno disprezzi la tua giovane età. Diventa piuttosto un esempio per i fedeli nel parlare, nel comportamento, nell’amore, nella fede, nella castità.")
+        sources.append(f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/1-timoteo/4/")
     item_id = parse_qs(urlsplit(user_url).query).get("item", [None])[0] if user_url else None
     video = get_video(item_id) if item_id else None
     if not video:
@@ -336,7 +347,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) or is_single_sister_encouragement_request(query) else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -383,9 +394,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if material:
         links = "\n".join(f"🔗 {source}" for source in sources)
         weekly_instructions = ""
+        scripture_instructions = ""
+        if is_scripture_request(text):
+            scripture_instructions = ("La persona chiede una scrittura precisa: rispondi subito con un solo riferimento biblico, riporta il testo esatto presente nel materiale ufficiale e spiega in una frase come può incoraggiare nella situazione descritta. Non introdurre con ‘La pubblicazione indica’ e non fare un riepilogo generale. Usa 📖 per il versetto e 💬 per l’applicazione; mantieni una riga vuota tra i due.\n\n")
+        if is_single_sister_encouragement_request(text):
+            scripture_instructions += ("Per questa richiesta proponi 1 Timoteo 4:12, riportando il testo fornito nel materiale ufficiale. Spiega con tatto che la scrittura parla alla giovane età di Timoteo e può ricordare alla sorella il valore dei suoi doni e del suo esempio; non dire che il versetto parla direttamente dell’isolamento.\n\n")
         if is_weekly_study_request(text):
             weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni “Scopri di più” e “Come rispondereste”, se presenti; prima di concludere controlla di non averne saltata nessuna. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per le domande finali della sezione “Come rispondereste” usa 🧩 per distinguerle come riepilogo, mantenendo 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
-        prompt = (weekly_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
+        prompt = (weekly_instructions + scripture_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
