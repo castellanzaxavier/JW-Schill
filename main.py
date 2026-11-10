@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import html
 import hmac
 import logging
 import os
@@ -307,9 +308,96 @@ def transcript(video):
         logger.warning("Sottotitoli JW non recuperabili: %s", exc)
         return None
 
+BIBLE_BOOK_SLUGS = (
+    ("cantico dei cantici", "cantico-dei-cantici"), ("2 tessalonicesi", "2-tessalonicesi"), ("1 tessalonicesi", "1-tessalonicesi"),
+    ("2 cronache", "2-cronache"), ("1 cronache", "1-cronache"), ("2 corinti", "2-corinti"), ("1 corinti", "1-corinti"),
+    ("2 samuele", "2-samuele"), ("1 samuele", "1-samuele"), ("2 timoteo", "2-timoteo"), ("1 timoteo", "1-timoteo"),
+    ("2 pietro", "2-pietro"), ("1 pietro", "1-pietro"), ("2 giovanni", "2-giovanni"), ("3 giovanni", "3-giovanni"),
+    ("2 re", "2-re"), ("1 re", "1-re"), ("apocalisse", "rivelazione"),
+    ("genesi", "genesi"), ("esodo", "esodo"), ("levitico", "levitico"), ("numeri", "numeri"), ("deuteronomio", "deuteronomio"),
+    ("giosue", "giosue"), ("giudici", "giudici"), ("rut", "rut"), ("esdra", "esdra"), ("neemia", "neemia"), ("ester", "ester"),
+    ("giobbe", "giobbe"), ("salmi", "salmi"), ("proverbi", "proverbi"), ("ecclesiaste", "ecclesiaste"), ("qohelet", "ecclesiaste"),
+    ("isaia", "isaia"), ("geremia", "geremia"), ("lamentazioni", "lamentazioni"), ("ezechiele", "ezechiele"), ("daniele", "daniele"),
+    ("osea", "osea"), ("gioele", "gioele"), ("amos", "amos"), ("abdia", "abdia"), ("giona", "giona"), ("michea", "michea"),
+    ("naum", "naum"), ("abacuc", "abacuc"), ("sofonia", "sofonia"), ("aggeo", "aggeo"), ("zaccaria", "zaccaria"), ("malachia", "malachia"),
+    ("matteo", "matteo"), ("marco", "marco"), ("luca", "luca"), ("giovanni", "giovanni"), ("atti", "atti"), ("romani", "romani"),
+    ("galati", "galati"), ("efesini", "efesini"), ("filippesi", "filippesi"), ("colossesi", "colossesi"), ("1 corinzi", "1-corinti"), ("2 corinzi", "2-corinti"),
+    ("tito", "tito"), ("filemone", "filemone"), ("ebrei", "ebrei"), ("giacomo", "giacomo"), ("giuda", "giuda"), ("rivelazione", "rivelazione"),
+)
+
 def is_scripture_request(query):
     q = normalize(query)
-    return any(term in q for term in ("scrittura", "versetto", "passo biblico", "testo biblico"))
+    return any(term in q for term in ("scrittura", "versetto", "passo biblico", "testo biblico", "brano biblico")) or bool(re.search(r"\b(?:quale|quali)\s+(?:passo|versetto|testo)\b", q))
+
+def parse_scripture_reference(text):
+    q = normalize(text)
+    for book, slug in sorted(BIBLE_BOOK_SLUGS, key=lambda item: len(item[0]), reverse=True):
+        match = re.search(rf"\b{re.escape(book)}\s+(\d+)\s*:\s*(\d+)(?:\s*[-–]\s*(\d+))?\b", q)
+        if match:
+            chapter, start = int(match.group(1)), int(match.group(2))
+            end = int(match.group(3) or start)
+            display_book = book.title()
+            return {"slug": slug, "chapter": chapter, "start": start, "end": end,
+                    "display": f"{display_book} {chapter}:{start}" + (f"-{end}" if end != start else "")}
+    return None
+
+def fetch_scripture_text(reference):
+    parsed = parse_scripture_reference(reference)
+    if not parsed:
+        return None
+    url = f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/{parsed['slug']}/{parsed['chapter']}/"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.info("Testo biblico non recuperabile per %s: %s", parsed["display"], exc)
+        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+    verses = []
+    for node in soup.select("span.verse"):
+        number_link = node.find("a", href=True)
+        number_match = re.search(r"\d+", number_link.get_text(" ", strip=True)) if number_link else None
+        if not number_match:
+            continue
+        number = int(number_match.group(0))
+        if not parsed["start"] <= number <= parsed["end"]:
+            continue
+        verse = BeautifulSoup(str(node), "html.parser")
+        for link in verse.select("a"):
+            link.decompose()
+        text = clean_text(str(verse))
+        text = re.sub(r"^\d+\s*", "", text).replace("+", "").replace("*", "").strip()
+        if text:
+            verses.append(text)
+    return " ".join(verses) if verses else None
+
+def scripture_answer_parts(answer):
+    parsed = parse_scripture_reference(answer)
+    if not parsed:
+        return None
+    verse_text = fetch_scripture_text(parsed["display"])
+    if not verse_text:
+        return None
+    explanation, sources, mode = [], [], None
+    for line in answer.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("💬"):
+            mode = "explanation"
+            content = stripped[1:].strip()
+            if content:
+                explanation.append(content)
+        elif stripped.startswith("🔎"):
+            mode = "sources"
+            content = stripped[1:].strip()
+            if content:
+                sources.append("🔎 " + content)
+        elif mode == "explanation" and stripped:
+            explanation.append(stripped)
+        elif mode == "sources" and stripped:
+            sources.append(stripped)
+    html_verse = f"📖 {html.escape(parsed['display'])}\n\n<i>{html.escape(verse_text)}</i>"
+    remainder = "\n\n".join(part for part in ("\n".join(explanation), "\n".join(sources)) if part)
+    return html_verse, remainder
 
 def is_young_ministry_goal_request(query):
     q = normalize(query)
@@ -406,7 +494,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         weekly_instructions = ""
         scripture_instructions = ""
         if is_scripture_request(text):
-            scripture_instructions = ("La persona chiede una scrittura precisa: rispondi subito con un solo riferimento biblico, riporta il testo esatto presente nel materiale ufficiale e spiega in una frase come può incoraggiare nella situazione descritta. Non introdurre con ‘La pubblicazione indica’ e non fare un riepilogo generale. Usa 📖 per il versetto e 💬 per l’applicazione; mantieni una riga vuota tra i due.\n\n")
+            scripture_instructions = ("La persona chiede una scrittura: indica il riferimento e includi SEMPRE il testo completo e letterale della Traduzione del Nuovo Mondo, mai una parafrasi al posto del versetto. Se la fonte trovata non riporta il testo biblico, usa il testo ufficiale del versetto scelto. Scrivi prima 📖 e il riferimento, poi il versetto su una riga propria; concludi con 💬 e una breve applicazione.\n\n")
         if is_young_ministry_goal_request(text):
             scripture_instructions += ("Per un giovane che vuole porsi mete per diventare servitore di ministero, proponi 1 Timoteo 4:12 e riportane il testo fornito nel materiale ufficiale. Spiega in modo concreto come diventare un esempio nel parlare, nel comportamento, nell’amore e nella fede sia una meta utile nel suo progresso. Non presentare il versetto come un elenco dei requisiti ufficiali per l’incarico.\n\n")
         elif is_single_sister_encouragement_request(text):
@@ -425,6 +513,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Errore durante la richiesta a Gemini")
         await update.message.reply_text("In questo momento non riesco a completare la risposta. Riprova tra poco.")
         return
+    if is_scripture_request(text):
+        scripture_parts = await asyncio.to_thread(scripture_answer_parts, answer)
+        if scripture_parts:
+            verse_html, explanation = scripture_parts
+            await update.message.reply_text(verse_html, parse_mode="HTML")
+            if explanation:
+                for chunk in re.findall(r".{1,3900}(?:\s|$)", explanation, flags=re.S):
+                    await update.message.reply_text(chunk.strip())
+            return
     for chunk in re.findall(r".{1,3900}(?:\s|$)", answer, flags=re.S):
         await update.message.reply_text(chunk.strip())
 
