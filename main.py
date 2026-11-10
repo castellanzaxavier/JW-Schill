@@ -395,6 +395,8 @@ def scripture_answer_parts(answer):
             explanation.append(stripped)
         elif mode == "sources" and stripped:
             sources.append(stripped)
+        elif mode is None and stripped and not parse_scripture_reference(stripped):
+            explanation.append(stripped)
     html_verse = f"📖 {html.escape(parsed['display'])}\n\n<i>{html.escape(verse_text)}</i>"
     remainder = "\n\n".join(part for part in ("\n".join(explanation), "\n".join(sources)) if part)
     return html_verse, remainder
