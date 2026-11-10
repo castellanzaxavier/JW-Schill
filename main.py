@@ -132,14 +132,31 @@ def fetch_page_long(url, limit=60000, with_url=False):
         return None
 
 def search_wol(query, limit=4):
-    """Cerca nelle pubblicazioni ufficiali della Biblioteca Online Watchtower."""
-    url = f"https://wol.jw.org/{LOCALE}/wol/s/{WOL_ROUTE}?q={quote_plus(query)}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
+    """Cerca nella WOL provando la frase originale e, se serve, termini più semplici."""
+    normalized = normalize(query)
+    stopwords = {"a", "ad", "al", "alla", "alle", "che", "chi", "come", "con", "cosa", "da", "dai", "dal", "dalla", "de", "del", "della", "di", "e", "è", "gli", "i", "il", "in", "io", "la", "le", "lo", "ma", "mi", "nel", "nella", "per", "si", "sono", "su", "un", "una", "uno", "vorrei", "puoi", "potresti", "dimmi", "dammi", "quale", "quali", "scrittura", "scritture"}
+    words = [word for word in re.findall(r"[a-z0-9]+", normalized) if word not in stopwords and len(word) > 2]
+    candidates = [query]
+    if words:
+        candidates.append(" ".join(words[:4]))
+    if any(word.startswith(("isol", "solitudin", "single", "solitari")) for word in words):
+        candidates.extend(("solitudine", "isolamento", "incoraggiamento"))
+    if any(word.startswith(("ans", "preoccup", "stress")) for word in words):
+        candidates.extend(("ansia", "preoccupazione", "incoraggiamento"))
+    if words:
+        candidates.extend(words[:3])
+
+    found, seen = [], set()
+    for search_query in dict.fromkeys(candidates):
+        url = f"https://wol.jw.org/{LOCALE}/wol/s/{WOL_ROUTE}?q={quote_plus(search_query)}"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Ricerca WOL non riuscita per '%s': %s", search_query, exc)
+            continue
         soup = BeautifulSoup(r.text, "html.parser")
         root = soup.select_one(".searchResultsForm") or soup.select_one("#regionMain") or soup
-        found, seen = [], set()
         for a in root.select("a[href]"):
             href = urljoin(r.url, a.get("href", ""))
             parts = urlsplit(href)
@@ -159,22 +176,32 @@ def search_wol(query, limit=4):
             seen.add(href)
             if len(found) >= limit:
                 break
-        return found
-    except requests.RequestException as exc:
-        logger.warning("Ricerca WOL non riuscita: %s", exc)
-        return []
+        if found:
+            logger.info("Ricerca WOL: '%s' ha prodotto %s risultati", search_query, len(found))
+            return found
+    logger.info("Ricerca WOL senza risultati per la domanda: %s", query)
+    return found
+
+
+def is_congregation_study_request(query):
+    q = normalize(query)
+    return bool(re.search(r"\bstudio\b.{0,30}\b(?:cong(?:regazione)?|congregazion[ei])", q))
 
 def is_weekly_study_request(query):
     q = normalize(query)
-    study_type = "studio di congregazione" in q or "studio biblico di congregazione" in q or "torre di guardia" in q or ("torre" in q and any(word in q for word in ("domande", "risposte", "studio", "articolo")))
-    return study_type and "settimana" in q
+    congregation = is_congregation_study_request(q)
+    watchtower = "torre" in q or "torre di guardia" in q or "articolo di studio" in q
+    weekly_context = any(term in q for term in ("settimana", "stasera", "questa sera", "oggi", "adunanza", "guida adunanza"))
+    study_context = any(term in q for term in ("studio", "domande", "risposte", "articolo", "programma"))
+    return weekly_context and study_context and (congregation or watchtower)
+
 
 def weekly_study_material(query):
     """Recupera dal calendario WOL il capitolo o l’articolo assegnato alla settimana corrente."""
     q = normalize(query)
     if not is_weekly_study_request(query):
         return None
-    congregation = "studio di congregazione" in q or "studio biblico di congregazione" in q
+    congregation = is_congregation_study_request(q)
     today = datetime.now(ZoneInfo("Europe/Rome")).date()
     monday = today - timedelta(days=today.weekday())
     date_url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
@@ -335,10 +362,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("Ciao! Puoi farmi una domanda, chiedermi di cercare nella Biblioteca Online o inviarmi il link a un video JW.org: userò i sottotitoli quando sono disponibili.")
 
+def is_study_followup(query):
+    q = normalize(query)
+    return any(term in q for term in ("guida adunanza", "programma", "per trovarlo", "per trovarla", "come ti ho detto", "di stasera", "della settimana"))
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     text = update.message.text.strip()
+    previous_study_query = context.user_data.get("last_weekly_study_query")
+    if is_weekly_study_request(text):
+        context.user_data["last_weekly_study_query"] = text
+    elif previous_study_query:
+        if is_study_followup(text):
+            text = f"{previous_study_query}. {text}"
+        context.user_data.pop("last_weekly_study_query", None)
     url = extract_jw_url(text)
     await update.message.reply_text("Cerco nelle fonti ufficiali e preparo la risposta…")
     material, sources = await asyncio.to_thread(research, text, url)
