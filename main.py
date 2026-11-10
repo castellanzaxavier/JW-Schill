@@ -311,13 +311,23 @@ def is_scripture_request(query):
     q = normalize(query)
     return any(term in q for term in ("scrittura", "versetto", "passo biblico", "testo biblico"))
 
+def is_young_ministry_goal_request(query):
+    q = normalize(query)
+    young_person = any(term in q for term in ("giovane", "giovani", "ragazzo", "ragazza"))
+    ministry_goal = any(term in q for term in ("servitore di ministero", "servitore ministeriale"))
+    encouragement = any(term in q for term in ("incoragg", "motivar", "mete", "obiettiv"))
+    return young_person and ministry_goal and encouragement
+
 def is_single_sister_encouragement_request(query):
     q = normalize(query)
     return "sorella" in q and any(term in q for term in ("single", "non sposata", "nubile")) and any(term in q for term in ("isol", "solitudin", "sola"))
 
+def is_specific_scripture_scenario(query):
+    return is_young_ministry_goal_request(query) or is_single_sister_encouragement_request(query)
+
 def research(query, user_url):
     chunks, sources = [], []
-    if is_single_sister_encouragement_request(query):
+    if is_specific_scripture_scenario(query):
         chunks.append("SCRITTURA BIBLICA UFFICIALE: 1 Timoteo 4:12 — Nessuno disprezzi la tua giovane età. Diventa piuttosto un esempio per i fedeli nel parlare, nel comportamento, nell’amore, nella fede, nella castità.")
         sources.append(f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/1-timoteo/4/")
     item_id = parse_qs(urlsplit(user_url).query).get("item", [None])[0] if user_url else None
@@ -347,7 +357,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) or is_single_sister_encouragement_request(query) else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) or is_specific_scripture_scenario(query) else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -397,7 +407,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scripture_instructions = ""
         if is_scripture_request(text):
             scripture_instructions = ("La persona chiede una scrittura precisa: rispondi subito con un solo riferimento biblico, riporta il testo esatto presente nel materiale ufficiale e spiega in una frase come può incoraggiare nella situazione descritta. Non introdurre con ‘La pubblicazione indica’ e non fare un riepilogo generale. Usa 📖 per il versetto e 💬 per l’applicazione; mantieni una riga vuota tra i due.\n\n")
-        if is_single_sister_encouragement_request(text):
+        if is_young_ministry_goal_request(text):
+            scripture_instructions += ("Per un giovane che vuole porsi mete per diventare servitore di ministero, proponi 1 Timoteo 4:12 e riportane il testo fornito nel materiale ufficiale. Spiega in modo concreto come diventare un esempio nel parlare, nel comportamento, nell’amore e nella fede sia una meta utile nel suo progresso. Non presentare il versetto come un elenco dei requisiti ufficiali per l’incarico.\n\n")
+        elif is_single_sister_encouragement_request(text):
             scripture_instructions += ("Per questa richiesta proponi 1 Timoteo 4:12, riportando il testo fornito nel materiale ufficiale. Spiega con tatto che la scrittura parla alla giovane età di Timoteo e può ricordare alla sorella il valore dei suoi doni e del suo esempio; non dire che il versetto parla direttamente dell’isolamento.\n\n")
         if is_weekly_study_request(text):
             weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni “Scopri di più” e “Come rispondereste”, se presenti; prima di concludere controlla di non averne saltata nessuna. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per le domande finali della sezione “Come rispondereste” usa 🧩 per distinguerle come riepilogo, mantenendo 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
