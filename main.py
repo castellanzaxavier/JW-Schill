@@ -525,7 +525,7 @@ def is_specific_scripture_scenario(query):
     return is_young_ministry_goal_request(query) or is_single_sister_encouragement_request(query)
 
 def research(query, user_url):
-    chunks, sources = [], []
+    chunks, sources = [], []; q = normalize(query); meetings_work_request = ("capofamiglia" in q or "capo famiglia" in q or "capo di famiglia" in q) and ("adun" in q or "riun" in q) and any(term in q for term in ("lavoro", "lavorare", "lavor")); meeting_verse = fetch_scripture_text("Ebrei 10:24-25") if meetings_work_request else None; chunks.append(f"SCRITTURA BIBLICA UFFICIALE Ebrei 10:24, 25: {meeting_verse}") if meeting_verse else None; sources.append(f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/ebrei/10/") if meeting_verse else None
     if is_specific_scripture_scenario(query):
         chunks.append("SCRITTURA BIBLICA UFFICIALE: 1 Timoteo 4:12 — Nessuno disprezzi la tua giovane età. Diventa piuttosto un esempio per i fedeli nel parlare, nel comportamento, nell’amore, nella fede, nella castità.")
         sources.append(f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/1-timoteo/4/")
@@ -556,7 +556,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) or meetings_work_request else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
