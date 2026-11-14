@@ -621,7 +621,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         prompt = (("Non sono riuscito a recuperare la pubblicazione corretta per questa settimana dalle fonti ufficiali. Dillo chiaramente e chiedi il link JW.org/WOL della pubblicazione; non rispondere usando materiale di un’altra settimana o una sezione diversa. Non inventare e non aggiungere saluti o benedizioni.\n\n" if is_weekly_study_request(text) else "La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi un link JW.org/WOL preciso o un estratto. Non inventare. Non aggiungere saluti o benedizioni.\n\n") + text)
     try:
-        answer = await asyncio.to_thread(ask_gemini, prompt)
+        answer = await asyncio.to_thread(ask_gemini, prompt); q = normalize(text); meetings_request = ("capofamiglia" in q or "capo famiglia" in q or "capo di famiglia" in q) and ("adun" in q or "riun" in q) and any(term in q for term in ("lavoro", "lavorare", "lavor")); answer = ("Ebrei 10:24-25" + chr(10) + chr(10) + "💬 Ebrei 10:24, 25 invita a non trascurare di riunirsi e a incoraggiarsi a vicenda. Puoi spiegare con calma che partecipare alle adunanze rafforza la fede della famiglia; insieme, valutate come organizzare gli impegni di lavoro per esserci con regolarità, senza trascurare necessità reali.") if meetings_request else answer
     except Exception:
         logger.exception("Errore durante la richiesta a Gemini")
         await update.message.reply_text("In questo momento non riesco a completare la risposta. Riprova tra poco.")
