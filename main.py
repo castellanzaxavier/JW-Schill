@@ -260,7 +260,7 @@ def weekly_treasures_material(query):
         return None
 
     start = next((m.start() for m in re.finditer(r"TESORI\s+DELLA\s+PAROLA\s+DI\s+DIO", guide_text, flags=re.I)), -1)
-    end_match = re.search(r"EFFICACI\s+NEL\s+MINISTERO", guide_text[start + 1:], flags=re.I) if start >= 0 else None; end = start + 1 + end_match.start() if end_match else -1
+    end_match = re.search(r"2\.\s*GEMME\s+SPIRITUALI", guide_text[start + 1:], flags=re.I) if start >= 0 else None; end = start + 1 + end_match.start() if end_match else -1
     if start < 0:
         logger.warning("Sezione Tesori non trovata nella guida: %s", final_url)
         return None
@@ -278,7 +278,7 @@ def weekly_treasures_material(query):
                               and "tesori della parola di dio" in normalize(node.get_text(" ", strip=True))), None)
         end_heading = next((i for i, node in enumerate(descendants[start_heading + 1:], start_heading + 1)
                             if getattr(node, "name", None) in ("h1", "h2", "h3", "h4", "h5", "h6")
-                            and "efficaci nel ministero" in normalize(node.get_text(" ", strip=True))), None) if start_heading is not None else None
+                            and "2. gemme spirituali" in normalize(node.get_text(" ", strip=True))), None) if start_heading is not None else None
         if start_heading is not None and end_heading is not None:
             seen = set()
             for i, node in enumerate(descendants[start_heading + 1:end_heading], start_heading + 1):
