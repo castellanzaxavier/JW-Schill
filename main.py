@@ -194,7 +194,7 @@ def is_weekly_study_request(query):
     watchtower = "torre" in q or "torre di guardia" in q or "articolo di studio" in q
     weekly_context = any(term in q for term in ("settimana", "stasera", "questa sera", "oggi", "adunanza", "guida adunanza"))
     study_context = any(term in q for term in ("studio", "domande", "risposte", "articolo", "programma"))
-    return weekly_context and study_context and (congregation or watchtower)
+    return (weekly_context and study_context and (congregation or watchtower)) or is_weekly_treasures_request(query)
 
 
 def fetch_study_reference_material(document_url, max_refs=8):
@@ -225,6 +225,84 @@ def fetch_study_reference_material(document_url, max_refs=8):
         if len(reference_chunks) >= max_refs:
             break
     return reference_chunks, reference_urls
+
+
+def is_weekly_treasures_request(query):
+    q = normalize(query)
+    weekly_context = any(term in q for term in ("settimana", "stasera", "questa sera", "oggi", "adunanza", "guida adunanza"))
+    treasures = any(term in q for term in ("tesori della parola", "tesori", "discorso tesori"))
+    return weekly_context and treasures
+
+
+def weekly_treasures_material(query):
+    """Recupera dalla guida ufficiale la sezione Tesori della settimana corrente."""
+    if not is_weekly_treasures_request(query):
+        return None
+    today = datetime.now(ZoneInfo("Europe/Rome")).date()
+    monday = today - timedelta(days=today.weekday())
+    date_url = f"https://wol.jw.org/{LOCALE}/wol/dt/{WOL_ROUTE}/{monday.year}/{monday.month}/{monday.day}"
+    try:
+        date_response = requests.get(date_url, headers=HEADERS, timeout=20)
+        date_response.raise_for_status()
+        date_soup = BeautifulSoup(date_response.text, "html.parser")
+        guide_link = next((a for a in date_soup.select("a[href]")
+                           if "guida per l" in normalize(a.get_text(" ", strip=True))
+                           and "vita e ministero" in normalize(a.get_text(" ", strip=True))), None)
+        if not guide_link:
+            return None
+        guide_url = urljoin(date_response.url, guide_link.get("href", ""))
+        fetched = fetch_page_long(guide_url, with_url=True)
+        if not fetched:
+            return None
+        guide_text, final_url = fetched
+    except requests.RequestException as exc:
+        logger.warning("Guida settimanale non recuperabile: %s", exc)
+        return None
+
+    start = next((m.start() for m in re.finditer(r"TESORI\s+DELLA\s+PAROLA\s+DI\s+DIO", guide_text, flags=re.I)), -1)
+    end_match = re.search(r"EFFICACI\s+NEL\s+MINISTERO", guide_text[start + 1:], flags=re.I) if start >= 0 else None; end = start + 1 + end_match.start() if end_match else -1
+    if start < 0:
+        logger.warning("Sezione Tesori non trovata nella guida: %s", final_url)
+        return None
+    section = guide_text[start:end] if end > start else guide_text[start:start + 12000]
+
+    reference_chunks, reference_urls = [], []
+    try:
+        response = requests.get(final_url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        root = soup.select_one("#regionMain") or soup
+        descendants = list(root.descendants)
+        start_heading = next((i for i, node in enumerate(descendants)
+                              if getattr(node, "name", None) in ("h1", "h2", "h3", "h4", "h5", "h6")
+                              and "tesori della parola di dio" in normalize(node.get_text(" ", strip=True))), None)
+        end_heading = next((i for i, node in enumerate(descendants[start_heading + 1:], start_heading + 1)
+                            if getattr(node, "name", None) in ("h1", "h2", "h3", "h4", "h5", "h6")
+                            and "efficaci nel ministero" in normalize(node.get_text(" ", strip=True))), None) if start_heading is not None else None
+        if start_heading is not None and end_heading is not None:
+            seen = set()
+            for i, node in enumerate(descendants[start_heading + 1:end_heading], start_heading + 1):
+                if getattr(node, "name", None) != "a" or "/wol/pc/" not in node.get("href", ""):
+                    continue
+                ref_url = urljoin(response.url, node.get("href", ""))
+                if ref_url in seen or not official_url(ref_url):
+                    continue
+                seen.add(ref_url)
+                ref = fetch_page_long(ref_url, limit=5000, with_url=True)
+                if ref:
+                    ref_text, ref_final_url = ref
+                    label = node.get_text(" ", strip=True) or "Fonte citata nella sezione Tesori"
+                    reference_chunks.append(f"FONTE CITATA ({label}):\n{ref_text[:5000]}")
+                    reference_urls.append(ref_final_url)
+                if len(reference_chunks) >= 6:
+                    break
+    except requests.RequestException as exc:
+        logger.info("Fonti citate nella sezione Tesori non recuperabili: %s", exc)
+
+    return [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{section}", *reference_chunks], [final_url, *reference_urls]
+
+
+
 
 
 def weekly_study_material(query):
@@ -468,7 +546,7 @@ def research(query, user_url):
         else:
             chunks.append(f"Trovato il video ufficiale {title}, ma non sono riuscito a recuperare il testo completo.")
             sources.append(video_url)
-    weekly_material = weekly_study_material(query)
+    weekly_material = weekly_treasures_material(query) if is_weekly_treasures_request(query) else weekly_study_material(query)
     if weekly_material:
         weekly_chunks, weekly_sources = weekly_material
         chunks.extend(weekly_chunks)
@@ -478,7 +556,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) or is_specific_scripture_scenario(query) else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -532,7 +610,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             scripture_instructions += ("Per un giovane che vuole porsi mete per diventare servitore di ministero, proponi 1 Timoteo 4:12 e riportane il testo fornito nel materiale ufficiale. Spiega in modo concreto come diventare un esempio nel parlare, nel comportamento, nell’amore e nella fede sia una meta utile nel suo progresso. Non presentare il versetto come un elenco dei requisiti ufficiali per l’incarico.\n\n")
         elif is_single_sister_encouragement_request(text):
             scripture_instructions += ("Per questa richiesta proponi 1 Timoteo 4:12, riportando il testo fornito nel materiale ufficiale. Spiega con tatto che la scrittura parla alla giovane età di Timoteo e può ricordare alla sorella il valore dei suoi doni e del suo esempio; non dire che il versetto parla direttamente dell’isolamento.\n\n")
-        if is_weekly_study_request(text):
+        if is_weekly_treasures_request(text):
+            weekly_instructions = ("Prepara il discorso dei Tesori usando soltanto la voce, il tema e la durata riportati nel programma ufficiale della settimana e le fonti citate sotto quella voce. Non scegliere un altro argomento. Segui i punti e i riferimenti biblici forniti, senza aggiungere temi o citazioni trovati altrove. Apri con un esempio breve, chiaro e dichiaratamente illustrativo, senza presentarlo come un fatto reale o attribuirlo a una pubblicazione. Poi sviluppa il tema con ordine, applicazioni concrete e una conclusione adatta a un discorso orale. Se il materiale ufficiale non basta a sostenere la durata prevista, dillo invece di riempire il discorso con contenuti estranei.\n\n")
+        elif is_weekly_study_request(text):
             weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni Per parlarne insieme, Vai più a fondo, Una storia che ti riguarda, Una prospettiva più ampia e Scopri di più, comprese tutte le domande non numerate. Non fermarti dopo le prime quattro domande. Prima di inviare, conta tutte le domande nel capitolo e verifica che siano presenti tutte, una sola volta e nell’ordine originale. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per la Torre di Guardia usa 🧩 per le domande riepilogative finali della sezione “Come rispondereste”; per lo studio di congregazione usa 🧩 per le domande della sezione “Una prospettiva più ampia”. Mantieni 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
         prompt = (weekly_instructions + scripture_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
