@@ -197,6 +197,36 @@ def is_weekly_study_request(query):
     return weekly_context and study_context and (congregation or watchtower)
 
 
+def fetch_study_reference_material(document_url, max_refs=8):
+    """Recupera le pubblicazioni citate nel capitolo per rispondere alle domande di approfondimento."""
+    if not official_url(document_url):
+        return [], []
+    try:
+        response = requests.get(document_url, headers=HEADERS, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.info("Pagina dello studio non recuperabile per le fonti citate: %s", exc)
+        return [], []
+    soup = BeautifulSoup(response.text, "html.parser")
+    root = soup.select_one("#regionMain") or soup
+    reference_chunks, reference_urls, seen = [], [], set()
+    for link in root.select('a[href*="/wol/pc/"]'):
+        reference_url = urljoin(response.url, link.get("href", ""))
+        if reference_url in seen or not official_url(reference_url):
+            continue
+        seen.add(reference_url)
+        fetched = fetch_page_long(reference_url, limit=4500, with_url=True)
+        if not fetched:
+            continue
+        reference_text, final_reference_url = fetched
+        label = link.get_text(" ", strip=True) or "Pubblicazione citata"
+        reference_chunks.append(f"FONTE CITATA ({label}):\n{reference_text[:4500]}")
+        reference_urls.append(final_reference_url)
+        if len(reference_chunks) >= max_refs:
+            break
+    return reference_chunks, reference_urls
+
+
 def weekly_study_material(query):
     """Recupera dal calendario WOL il capitolo o l’articolo assegnato alla settimana corrente."""
     q = normalize(query)
@@ -250,8 +280,9 @@ def weekly_study_material(query):
         return None
     document, final_url = fetched
     kind = "Studio biblico di congregazione" if congregation else "Torre di Guardia per lo studio"
+    reference_chunks, reference_urls = fetch_study_reference_material(final_url)
     return [f"PROGRAMMA UFFICIALE DELLA SETTIMANA ({monday.isoformat()}):\n{context}",
-            f"TESTO COMPLETO DELLO STUDIO ({kind}):\n{document}"], [guide_url, final_url]
+            f"TESTO COMPLETO DELLO STUDIO ({kind}):\n{document}", *reference_chunks], [guide_url, final_url, *reference_urls]
 
 def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
@@ -502,7 +533,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif is_single_sister_encouragement_request(text):
             scripture_instructions += ("Per questa richiesta proponi 1 Timoteo 4:12, riportando il testo fornito nel materiale ufficiale. Spiega con tatto che la scrittura parla alla giovane età di Timoteo e può ricordare alla sorella il valore dei suoi doni e del suo esempio; non dire che il versetto parla direttamente dell’isolamento.\n\n")
         if is_weekly_study_request(text):
-            weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni “Scopri di più” e “Come rispondereste”, se presenti; prima di concludere controlla di non averne saltata nessuna. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per le domande finali della sezione “Come rispondereste” usa 🧩 per distinguerle come riepilogo, mantenendo 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
+            weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni Per parlarne insieme, Vai più a fondo, Una storia che ti riguarda, Una prospettiva più ampia e Scopri di più, comprese tutte le domande non numerate. Non fermarti dopo le prime quattro domande. Prima di inviare, conta tutte le domande nel capitolo e verifica che siano presenti tutte, una sola volta e nell’ordine originale. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per la Torre di Guardia usa 🧩 per le domande riepilogative finali della sezione “Come rispondereste”; per lo studio di congregazione usa 🧩 per le domande della sezione “Una prospettiva più ampia”. Mantieni 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale.\n\n")
         prompt = (weekly_instructions + scripture_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
