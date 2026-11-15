@@ -154,7 +154,7 @@ def search_wol(query, limit=4):
         if "sorella" in q and any(term in q for term in ("single", "non sposata", "nubile")):
             targeted = ["esperienze sorelle non sposate", "esperienza sorella single", "testimonianze sorelle sole"]
         elif any(term in q for term in ("ragazzo", "ragazza", "giovane", "giovani", "fratello")):
-            targeted = ["giovane fratello esperienza", "esperienza giovane fratello", "esperienze giovani testimoni"]
+            targeted = ["Seung-Woo", "giovane fratello esperienza", "esperienze giovani testimoni"]
         else:
             targeted = ["esperienze dei nostri giorni testimoni", "esperienze moderne testimoni", "esperienze testimoni di Geova"]
         candidates = [*targeted, *candidates]
