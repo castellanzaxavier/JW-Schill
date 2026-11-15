@@ -7,7 +7,9 @@ import os
 import re
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, quote_plus, urljoin, urlsplit
 
@@ -92,11 +94,12 @@ def clean_text(markup):
         node.decompose()
     return " ".join(soup.stripped_strings)
 
+@lru_cache(maxsize=128)
 def fetch_page(url):
     if not official_url(url):
         return None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         for selector in ("div.bodyTxt", "div.docBody", "article"):
@@ -111,12 +114,13 @@ def fetch_page(url):
         logger.info("Pagina JW non recuperabile: %s", exc)
         return None
 
+@lru_cache(maxsize=128)
 def fetch_page_long(url, limit=60000, with_url=False):
     """Estrae il testo completo delle pagine WOL e, se richiesto, l’URL finale dopo i reindirizzamenti."""
     if not official_url(url):
         return None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         for selector in ("#regionMain", "div.bodyTxt", "div.docBody", "article"):
@@ -132,6 +136,7 @@ def fetch_page_long(url, limit=60000, with_url=False):
         logger.info("Pagina JW completa non recuperabile: %s", exc)
         return None
 
+@lru_cache(maxsize=64)
 def search_wol(query, limit=4):
     """Cerca nella WOL provando la frase originale e, se serve, termini più semplici."""
     normalized = normalize(query)
@@ -148,10 +153,10 @@ def search_wol(query, limit=4):
         candidates.extend(words[:3])
 
     found, seen = [], set()
-    for search_query in dict.fromkeys(candidates):
+    for search_query in dict.fromkeys(candidates[:5]):
         url = f"https://wol.jw.org/{LOCALE}/wol/s/{WOL_ROUTE}?q={quote_plus(search_query)}"
         try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
+            r = requests.get(url, headers=HEADERS, timeout=10)
             r.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("Ricerca WOL non riuscita per '%s': %s", search_query, exc)
@@ -366,6 +371,7 @@ def normalize(value):
     value = unicodedata.normalize("NFKD", value.lower())
     return "".join(ch for ch in value if not unicodedata.combining(ch))
 
+@lru_cache(maxsize=128)
 def correct_user_query(query):
     """Corregge refusi e abbreviazioni senza cambiare l’intento della domanda."""
     if len(query) > 6000:
@@ -520,7 +526,7 @@ def fetch_scripture_text(reference):
         return None
     url = f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/{parsed['slug']}/{parsed['chapter']}/"
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
     except requests.RequestException as exc:
         logger.info("Testo biblico non recuperabile per %s: %s", parsed["display"], exc)
@@ -625,11 +631,14 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) or meetings_work_request or is_governing_body_update_request(query) else search_wol(query)):
-        text = fetch_page(result["url"]) or result["snippet"]
-        if text:
-            chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
-            sources.append(result["url"])
+    search_results = [] if (is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) or meetings_work_request or is_governing_body_update_request(query)) else search_wol(query)
+    if search_results:
+        with ThreadPoolExecutor(max_workers=min(4, len(search_results))) as executor:
+            page_texts = list(executor.map(lambda result: fetch_page(result["url"]) or result["snippet"], search_results))
+        for result, text in zip(search_results, page_texts):
+            if text:
+                chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
+                sources.append(result["url"])
     sources = list(dict.fromkeys(sources))
     return "\n\n---\n\n".join(chunks)[:85000], sources
 
@@ -659,7 +668,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     raw_text = update.message.text.strip()
-    await update.message.reply_text("Certo, ricerco e ti do i risultati che volevi.")
+    await update.message.reply_text("Certamente, attendi solo una manciata di secondi...")
     text = await asyncio.to_thread(correct_user_query, raw_text)
     previous_study_query = context.user_data.get("last_weekly_study_query")
     if is_weekly_study_request(text):
