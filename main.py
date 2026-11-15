@@ -149,6 +149,8 @@ def search_wol(query, limit=4):
         candidates.extend(("solitudine", "isolamento", "incoraggiamento"))
     if any(word.startswith(("ans", "preoccup", "stress")) for word in words):
         candidates.extend(("ansia", "preoccupazione", "incoraggiamento"))
+    if is_modern_experience_request(query):
+        candidates = ["esperienze sorelle non sposate", "esperienza sorella single", "testimonianze sorelle sole", *candidates]
     if words:
         candidates.extend(words[:3])
 
@@ -664,13 +666,30 @@ def is_study_followup(query):
     q = normalize(query)
     return any(term in q for term in ("guida adunanza", "programma", "per trovarlo", "per trovarla", "come ti ho detto", "di stasera", "della settimana"))
 
+def is_followup_clarification(query):
+    q = normalize(query)
+    phrases = ("ho detto", "intendevo", "volevo dire", "mi riferivo", "non hai capito", "non quello", "non quella", "ti ho chiesto", "ho chiesto", "come ho detto", "della domanda precedente")
+    return len(q.split()) <= 18 and any(phrase in q for phrase in phrases)
+
+def is_modern_experience_request(query):
+    q = normalize(query)
+    asks_experience = any(term in q for term in ("esperienza", "esperienze", "testimonianza", "raccontami", "protagonista"))
+    asks_modern = any(term in q for term in ("tempi moderni", "moderna", "moderno", "oggi", "contemporanea", "contemporaneo"))
+    asks_single = any(term in q for term in ("single", "non sposata", "non sposato", "nubile", "celibe", "sola", "solo"))
+    return asks_experience and asks_modern and asks_single
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     raw_text = update.message.text.strip()
     await update.message.reply_text("Certamente, attendi solo una manciata di secondi...")
-    text = await asyncio.to_thread(correct_user_query, raw_text)
+    corrected_text = await asyncio.to_thread(correct_user_query, raw_text)
     previous_study_query = context.user_data.get("last_weekly_study_query")
+    previous_question = context.user_data.get("last_general_question")
+    is_clarification = bool(previous_question and not previous_study_query and is_followup_clarification(raw_text))
+    text = (f"{previous_question}\n\nChiarimento dell’utente: {corrected_text}"
+            if is_clarification else corrected_text)
+    context.user_data["last_general_question"] = previous_question if is_clarification else text
     if is_weekly_study_request(text):
         context.user_data["last_weekly_study_query"] = text
     elif previous_study_query:
@@ -683,6 +702,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         links = "\n".join(f"🔗 {source}" for source in sources)
         weekly_instructions = ""
         scripture_instructions = ""
+        modern_experience_instructions = ""
+        if is_modern_experience_request(text):
+            modern_experience_instructions = ("La persona chiede un’esperienza reale dei tempi moderni che abbia come protagonista una donna single. Non sostituirla con un racconto biblico o antico. Usa solo una fonte che descriva chiaramente una persona contemporanea e la sua esperienza; se il materiale recuperato non contiene un caso del genere, dichiaralo e non inventare né adattare un racconto diverso.\n\n")
         if is_scripture_request(text):
             scripture_instructions = ("La persona chiede una scrittura: indica il riferimento e includi SEMPRE il testo completo e letterale della Traduzione del Nuovo Mondo, mai una parafrasi al posto del versetto. Se la fonte trovata non riporta il testo biblico, usa il testo ufficiale del versetto scelto. Scrivi prima 📖 e il riferimento, poi il versetto su una riga propria; concludi con 💬 e una breve applicazione.\n\n")
         if is_young_ministry_goal_request(text):
@@ -693,12 +715,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             weekly_instructions = ("Prepara il discorso dei Tesori usando soltanto la voce, il tema e la durata riportati nel programma ufficiale della settimana e le fonti citate sotto quella voce. Non scegliere un altro argomento. Segui i punti e i riferimenti biblici forniti, senza aggiungere temi o citazioni trovati altrove. Apri con un esempio breve, chiaro e dichiaratamente illustrativo, senza presentarlo come un fatto reale o attribuirlo a una pubblicazione. Poi sviluppa il tema con ordine, applicazioni concrete e una conclusione adatta a un discorso orale. Se il materiale ufficiale non basta a sostenere la durata prevista, dillo invece di riempire il discorso con contenuti estranei.\n\n")
         elif is_weekly_study_request(text):
             weekly_instructions = ("Rispondi a tutte le domande presenti nello studio ufficiale recuperato, nell’ordine in cui compaiono, senza ometterne nessuna. Riporta ogni domanda fedelmente una sola volta, mantieni all’inizio della domanda il numero del paragrafo corrispondente quando compare nel testo (per esempio “1.”, “2.”); metti subito sotto la risposta, con una riga vuota tra una coppia domanda-risposta e la successiva. Includi anche tutte le domande delle sezioni Per parlarne insieme, Vai più a fondo, Una storia che ti riguarda, Una prospettiva più ampia e Scopri di più, comprese tutte le domande non numerate. Non fermarti dopo le prime quattro domande. Prima di inviare, conta tutte le domande nel capitolo e verifica che siano presenti tutte, una sola volta e nell’ordine originale. Anteponi ❓ alle domande numerate dell’articolo e 💬 a ogni risposta. Per la Torre di Guardia usa 🧩 per le domande riepilogative finali della sezione “Come rispondereste”; per lo studio di congregazione usa 🧩 per le domande della sezione “Una prospettiva più ampia”. Mantieni 💬 davanti a ogni risposta. Mantieni ogni risposta semplice, naturale e pronunciabile in meno di 20 secondi (massimo circa 35 parole), con tono caldo e concreto, come richiesto, senza fingere di essere una persona reale. Prima di rispondere, individua nel testo il paragrafo corrispondente a ciascuna domanda e verifica che la risposta rispetti soggetto, numero e tutti gli aspetti richiesti; non rispondere alla domanda successiva al posto di quella corrente. Per la domanda 1 di “Come possiamo avere un cuore ubbidiente”, includi i motivi generali per cui le persone ubbidiscono a chi ha autorità (sono osservate, evitano una punizione o cercano prestigio), poi il motivo per cui noi ubbidiamo a Geova (riconosciamo che la sua guida è per il nostro bene). Distingui questo dalla domanda 2, che spiega che la ragione principale è l’amore per Geova. \n\n")
-        prompt = (weekly_instructions + scripture_instructions + "Rispondi usando il materiale ufficiale fornito. Per un video esamina tutti i sottotitoli "
+        prompt = (weekly_instructions + scripture_instructions + modern_experience_instructions + "Rispondi usando il materiale ufficiale fornito. Non introdurre osservazioni sui video se la domanda non riguarda un video. Per un video esamina tutti i sottotitoli "
                   "prima di rispondere. Scrivi in testo semplice: niente asterischi, cancelletti o formattazione Markdown. Usa emoji come intestazioni. Ogni voce dell’elenco deve iniziare con un’emoji pertinente, senza pallini, trattini o numeri. Separa le voci e gli argomenti con una riga vuota. Introduci direttamente con “Il video ...” o “La pubblicazione ...”; non parlare di trascrizioni o sottotitoli. Per richieste di riepilogo, copri in modo dettagliato tutti i segmenti del programma, i temi, le esperienze, gli esempi, le dimostrazioni, le applicazioni pratiche e le conclusioni presenti nel materiale. Non fermarti a una sintesi generica e non tralasciare i punti secondari. Rimani fedele alle fonti, non aggiungere dettagli non presenti e indica quando un passaggio non è chiaro. "
                   "Aggiungi una sezione '🔎 Fonti' con i link sotto. Non aggiungere saluti o benedizioni.\n\n"
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
     else:
-        prompt = (("Non sono riuscito a recuperare la pubblicazione corretta per questa settimana dalle fonti ufficiali. Dillo chiaramente e chiedi il link JW.org/WOL della pubblicazione; non rispondere usando materiale di un’altra settimana o una sezione diversa. Non inventare e non aggiungere saluti o benedizioni.\n\n" if is_weekly_study_request(text) else "La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi un link JW.org/WOL preciso o un estratto. Non inventare. Non aggiungere saluti o benedizioni.\n\n") + text)
+        if is_modern_experience_request(text):
+            no_material = "Non ho trovato nelle fonti recuperate un’esperienza moderna che corrisponda alla richiesta. Non usare un personaggio biblico o un esempio antico come sostituto; chiedi se la persona vuole fornire una pubblicazione o un link preciso. Non inventare.\n\n"
+        elif is_weekly_study_request(text):
+            no_material = "Non sono riuscito a recuperare la pubblicazione corretta per questa settimana dalle fonti ufficiali. Dillo chiaramente e chiedi il link JW.org/WOL della pubblicazione; non rispondere usando materiale di un’altra settimana o una sezione diversa. Non inventare.\n\n"
+        else:
+            no_material = "La ricerca ufficiale non ha trovato materiale utilizzabile. Dillo chiaramente e chiedi un link JW.org/WOL preciso o un estratto. Non inventare.\n\n"
+        prompt = no_material + text
     try:
         answer = await asyncio.to_thread(ask_gemini, prompt); q = normalize(text); meetings_request = ("capofamiglia" in q or "capo famiglia" in q or "capo di famiglia" in q) and ("adun" in q or "riun" in q) and any(term in q for term in ("lavoro", "lavorare", "lavor")); answer = ("Ebrei 10:24-25" + chr(10) + chr(10) + "💬 Ebrei 10:24, 25 invita a non trascurare di riunirsi e a incoraggiarsi a vicenda. Puoi spiegare con calma che partecipare alle adunanze rafforza la fede della famiglia; insieme, valutate come organizzare gli impegni di lavoro per esserci con regolarità, senza trascurare necessità reali.") if meetings_request else answer
     except Exception:
