@@ -150,7 +150,14 @@ def search_wol(query, limit=4):
     if any(word.startswith(("ans", "preoccup", "stress")) for word in words):
         candidates.extend(("ansia", "preoccupazione", "incoraggiamento"))
     if is_modern_experience_request(query):
-        candidates = ["esperienze sorelle non sposate", "esperienza sorella single", "testimonianze sorelle sole", *candidates]
+        q = normalize(query)
+        if "sorella" in q and any(term in q for term in ("single", "non sposata", "nubile")):
+            targeted = ["esperienze sorelle non sposate", "esperienza sorella single", "testimonianze sorelle sole"]
+        elif any(term in q for term in ("ragazzo", "ragazza", "giovane", "giovani", "fratello")):
+            targeted = ["giovane fratello esperienza", "esperienza giovane fratello", "esperienze giovani testimoni"]
+        else:
+            targeted = ["esperienze dei nostri giorni testimoni", "esperienze moderne testimoni", "esperienze testimoni di Geova"]
+        candidates = [*targeted, *candidates]
     if words:
         candidates.extend(words[:3])
 
@@ -675,8 +682,7 @@ def is_modern_experience_request(query):
     q = normalize(query)
     asks_experience = any(term in q for term in ("esperienza", "esperienze", "testimonianza", "raccontami", "protagonista"))
     asks_modern = any(term in q for term in ("tempi moderni", "moderna", "moderno", "oggi", "contemporanea", "contemporaneo"))
-    asks_single = any(term in q for term in ("single", "non sposata", "non sposato", "nubile", "celibe", "sola", "solo"))
-    return asks_experience and asks_modern and asks_single
+    return asks_experience and asks_modern
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -704,7 +710,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scripture_instructions = ""
         modern_experience_instructions = ""
         if is_modern_experience_request(text):
-            modern_experience_instructions = ("La persona chiede un’esperienza reale dei tempi moderni che abbia come protagonista una donna single. Non sostituirla con un racconto biblico o antico. Usa solo una fonte che descriva chiaramente una persona contemporanea e la sua esperienza; se il materiale recuperato non contiene un caso del genere, dichiaralo e non inventare né adattare un racconto diverso.\n\n")
+            modern_experience_instructions = ("La persona chiede un’esperienza reale dei tempi moderni. Rispetta ogni caratteristica del protagonista specificata nella domanda (per esempio età, genere o stato civile). Non sostituire un’esperienza moderna con un racconto biblico o antico. Usa solo una fonte che descriva chiaramente una persona contemporanea e un’esperienza realmente vissuta; se il materiale recuperato non contiene un caso pertinente, dichiaralo senza inventare né adattare un racconto diverso.\n\n")
         if is_scripture_request(text):
             scripture_instructions = ("La persona chiede una scrittura: indica il riferimento e includi SEMPRE il testo completo e letterale della Traduzione del Nuovo Mondo, mai una parafrasi al posto del versetto. Se la fonte trovata non riporta il testo biblico, usa il testo ufficiale del versetto scelto. Scrivi prima 📖 e il riferimento, poi il versetto su una riga propria; concludi con 💬 e una breve applicazione.\n\n")
         if is_young_ministry_goal_request(text):
@@ -721,7 +727,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   f"Domanda: {text}\n\nMateriale:\n{material}\n\nFonti:\n{links}")
     else:
         if is_modern_experience_request(text):
-            no_material = "Non ho trovato nelle fonti recuperate un’esperienza moderna che corrisponda alla richiesta. Non usare un personaggio biblico o un esempio antico come sostituto; chiedi se la persona vuole fornire una pubblicazione o un link preciso. Non inventare.\n\n"
+            no_material = "Non ho trovato nelle fonti recuperate un’esperienza moderna che corrisponda alla richiesta. Non usare un personaggio o un racconto biblico antico come sostituto; chiedi se la persona vuole fornire una pubblicazione o un link preciso. Non inventare.\n\n"
         elif is_weekly_study_request(text):
             no_material = "Non sono riuscito a recuperare la pubblicazione corretta per questa settimana dalle fonti ufficiali. Dillo chiaramente e chiedi il link JW.org/WOL della pubblicazione; non rispondere usando materiale di un’altra settimana o una sezione diversa. Non inventare.\n\n"
         else:
