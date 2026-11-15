@@ -41,7 +41,7 @@ WEBHOOK_SECRET = hashlib.sha256(("JW-Schill:" + TELEGRAM_TOKEN).encode()).hexdig
 
 SYSTEM_PROMPT = """
 Sei un assistente virtuale fraterno e rispondi in italiano con tono rispettoso, chiaro e caloroso.
-Usa esclusivamente le fonti ufficiali e i testi forniti. Considera le fonti come contesto e riferimento, non come materiale da riassumere automaticamente: ragiona sulla domanda concreta alla luce delle linee guida bibliche, collega i princìpi alla situazione e distingui chiaramente il testo citato dalla sua applicazione. Non scegliere una scrittura soltanto perché ripete parole della domanda. Per domande su video, esamina tutti i
+Usa esclusivamente le fonti ufficiali JW.org e WOL (wol.jw.org) e i testi forniti. Considera le fonti come contesto e riferimento, non come materiale da riassumere automaticamente: ragiona sulla domanda concreta alla luce delle linee guida bibliche, collega i princìpi alla situazione e distingui chiaramente il testo citato dalla sua applicazione. Non scegliere una scrittura soltanto perché ripete parole della domanda. Per domande su video, esamina tutti i
 testo del video disponibile e organizza una risposta esauriente, fedele al contenuto e pertinente alla
 domanda, includendo punti principali, esempi e conclusioni. Distingui le affermazioni delle fonti
 dalle spiegazioni. Non inventare citazioni o riferimenti; cita i link delle fonti forniti.
@@ -408,6 +408,47 @@ def monthly_broadcast(query):
         candidates = [m for m in (candidates or media) if all(y in m.get("title", "") for y in years)]
     return candidates[0] if candidates else ({"title": "JW Broadcasting (ottobre 2024)", "naturalKey": "pub-jwb-117_1_VIDEO"} if "ottobre" in q and "2024" in q else None)
 
+def is_governing_body_update_request(query):
+    q = normalize(query)
+    has_update = any(term in q for term in ("aggiornamento", "aggiornamenti", "update", "resoconto"))
+    has_body = bool(re.search(r"\bcorpo\s+direttiv\w*\b", q)) or "corpo direttivo" in q
+    return has_update and has_body
+
+
+def governing_body_update(query):
+    """Trova il video richiesto nel catalogo ufficiale JW, senza passare dalla ricerca WOL."""
+    q = normalize(query)
+    year_match = re.search(r"\b(20\d{2})\b", q)
+    year = year_match.group(1) if year_match else str(datetime.now(ZoneInfo("Europe/Rome")).year)
+    number_match = re.search(r"\b(?:n(?:umero)?\.?\s*)(\d{1,2})\b", q)
+    if not number_match:
+        number_match = re.search(r"\bcorpo\s+direttiv\w*.{0,30}?\b(\d{1,2})\s+(?:del\s+)?20\d{2}\b", q)
+    number = number_match.group(1) if number_match else None
+    try:
+        response = requests.get(
+            f"{MEDIA_API}/categories/{LANGUAGE}/VOXGBUpdates?detailed=1",
+            headers=HEADERS,
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+        media = (data.get("category") or {}).get("media") or data.get("media") or []
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Catalogo degli aggiornamenti del Corpo Direttivo non disponibile: %s", exc)
+        return None
+
+    candidates = []
+    for item in media:
+        title = normalize(item.get("title", ""))
+        if year not in title:
+            continue
+        item_number = re.search(r"\bn\.?\s*(\d{1,2})\b", title)
+        if number and (not item_number or item_number.group(1) != number):
+            continue
+        candidates.append(item)
+    return candidates[0] if candidates else None
+
+
 def get_video(item_id):
     if not re.fullmatch(r"[A-Za-z0-9_-]{3,100}", item_id or ""):
         return None
@@ -554,10 +595,15 @@ def research(query, user_url):
         sources.append(f"https://www.jw.org/{LOCALE}/biblioteca-digitale/bibbia/nwt/libri/1-timoteo/4/")
     item_id = parse_qs(urlsplit(user_url).query).get("item", [None])[0] if user_url else None
     video = get_video(item_id) if item_id else None
+    if not video and is_governing_body_update_request(query):
+        video = governing_body_update(query)
+        if video:
+            item_id = video.get("languageAgnosticNaturalKey") or video.get("naturalKey")
     if not video:
         video = monthly_broadcast(query)
         if video:
-            item_id = video.get("languageAgnosticNaturalKey") or video.get("naturalKey"); video = get_video(item_id) or video
+            item_id = video.get("languageAgnosticNaturalKey") or video.get("naturalKey")
+            video = get_video(item_id) or video
     if video:
         title = video.get("title", "Video JW.org")
         video_url = f"https://www.jw.org/{LOCALE}/biblioteca-digitale/video/?item={item_id}"
@@ -579,7 +625,7 @@ def research(query, user_url):
         if page_text:
             chunks.append(f"TESTO DELLA PAGINA {user_url}:\n{page_text}")
             sources.append(user_url)
-    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) or meetings_work_request else search_wol(query)):
+    for result in ([] if is_weekly_study_request(query) or is_weekly_treasures_request(query) or is_specific_scripture_scenario(query) or meetings_work_request or is_governing_body_update_request(query) else search_wol(query)):
         text = fetch_page(result["url"]) or result["snippet"]
         if text:
             chunks.append(f"RISULTATO WOL: {result['title']}\nURL: {result['url']}\n{text[:5000]}")
@@ -612,7 +658,9 @@ def is_study_followup(query):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
-    text = update.message.text.strip(); text = await asyncio.to_thread(correct_user_query, text)
+    raw_text = update.message.text.strip()
+    await update.message.reply_text("Certo, ricerco e ti do i risultati che volevi.")
+    text = await asyncio.to_thread(correct_user_query, raw_text)
     previous_study_query = context.user_data.get("last_weekly_study_query")
     if is_weekly_study_request(text):
         context.user_data["last_weekly_study_query"] = text
@@ -621,7 +669,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"{previous_study_query}. {text}"
         context.user_data.pop("last_weekly_study_query", None)
     url = extract_jw_url(text)
-    await update.message.reply_text("Cerco nelle fonti ufficiali e preparo la risposta…")
     material, sources = await asyncio.to_thread(research, text, url)
     if material:
         links = "\n".join(f"🔗 {source}" for source in sources)
