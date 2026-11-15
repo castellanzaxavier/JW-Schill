@@ -649,7 +649,7 @@ def ask_gemini(prompt):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
-        await update.message.reply_text("Ciao! Puoi farmi una domanda, chiedermi di cercare nella Biblioteca Online o inviarmi il link a un video JW.org: userò i sottotitoli quando sono disponibili.")
+        await update.message.reply_text("un aiutino per le tue ricerche...e tanto altro", disable_web_page_preview=True)
 
 def is_study_followup(query):
     q = normalize(query)
